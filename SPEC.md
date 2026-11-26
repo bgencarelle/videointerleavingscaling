@@ -4,8 +4,8 @@ A native Apple Silicon tool that repeatedly downscales and upscales an image
 sequence, driven from a small local browser page. This file records every
 decision; it is updated whenever a decision changes.
 
-Status: stages 1 (engine) and 2 (models) are built, with the lead-in /
-loop / finish pass shape. The GUI is stage 5.
+Status: stages 1-5 are built: engine, models, xBR and colour resolution,
+contact sheets, GUI.
 
 ## Passes
 
@@ -134,18 +134,36 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   torch and libwebp versions, the tone curve, and every model with its
   checksum) and `log.txt`.
 - `OUT/catalog.csv`: one row per source × pass.
-- **Contact sheet** (stage 4): a step-by-step sheet for the last of each cycle
-  (last A, last B ...), using the same random frames for every pass from the
-  same source.
+- **Contact sheets:** `contact_<cycle>.png` for the last run of each cycle
+  (last A, last B, ...). Rows are 6 random frames, the same for every pass
+  of a source (seeded by the source folder name). Columns are the cycle
+  start, every step, and the landing on the loop size; each is scaled to a
+  240 px row with nearest. Captures are kept in `.contact/` across batches,
+  and the sheet is rebuilt after each batch that contains one of the frames.
 
-## GUI (stage 5, this Mac only)
+## GUI (this Mac only)
 
-1. Build a pass: cycles, steps, pattern, iterations, save-every, rounding,
-   output folder, folder-name preview, saved presets.
-2. Queue: progress, time left, pause/resume, skip passes that are already
-   done; benchmark and estimate (hours, disk) before each run, with
-   confirmation.
-3. Results: contact sheets side by side, filterable.
+- `python -m faceloop gui` or `faceloop.command`. It's a standard-library
+  HTTP server on 127.0.0.1:8765, and it refuses any Host header that isn't
+  localhost.
+- The page is one HTML file with plain JavaScript and no build step.
+- Folder pickers use the macOS "choose folder" dialog via osascript.
+- Images are served only from output folders the app knows about.
+1. **Build:** folders; lead-in, cycles and finish as step lists (add,
+   reorder, remove); pattern; cycles total; save every; rounding; light;
+   output format. Live preview of every step's size (with the aspect error
+   when a height can't be exact), the loop size, the folder name, the GAN
+   flag and the save points. Presets are saved to `presets/<name>.json`.
+2. **Estimate & queue:** times one batch on the GPU (sharing a lock with the
+   running pass, which waits between cycles), shows time and disk, and
+   queues on confirmation.
+3. **Queue:** `state/queue.json`, run one at a time. Pause/resume between
+   cycles; stop; continue/run again; reorder; remove. A pass that was
+   running when the app quit is queued again and resumes from the
+   finished frames.
+4. **Results:** every pass under an output folder (complete or not), with
+   contact sheets, the last saved frame, a filter, a card size, and "Load
+   into Build".
 
 ## Install and delivery
 
@@ -158,6 +176,5 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 2. Models: ports, catalogue, downloads, drop-ins, GPU self-test, benchmark. **done**
 3. xBR and the colour-resolution step. **done** (Analog and the other
    pixel-art scalers were dropped: only existing algorithms.)
-4. Contact sheets; pass catalogue polish.
-5. GUI.
-6. Benchmark/estimate in the GUI, README polish.
+4. Contact sheets. **done**
+5. GUI, with the estimate before queueing. **done**

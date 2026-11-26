@@ -5,6 +5,7 @@
   selftest                    check the GPU, the WebP writer and every downloaded model
   bench RECIPE --source DIR   time a few frames and estimate the full pass
   run RECIPE --source DIR --out DIR
+  gui [--port 8765] [--no-browser]   the local GUI (this Mac only)
 """
 from __future__ import annotations
 
@@ -217,6 +218,13 @@ def cmd_run(args):
     return 0
 
 
+def cmd_gui(args):
+    from .gui import App, serve
+    from .engine import pick_device
+    serve(port=args.port, open_browser=not args.no_browser, app=App(device=pick_device(args.device)))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="faceloop")
     p.add_argument("--device", default=None, help="mps / cpu (default: best available)")
@@ -237,8 +245,11 @@ def main(argv=None):
     r.add_argument("--out", required=True)
     r.add_argument("--batch", type=int, default=None)
     r.add_argument("--limit", type=int, default=None, help="only the first N frames (for trying things)")
+    g = sub.add_parser("gui")
+    g.add_argument("--port", type=int, default=8765)
+    g.add_argument("--no-browser", action="store_true")
     args = p.parse_args(argv)
-    return {"models": cmd_models, "selftest": cmd_selftest, "bench": cmd_bench, "run": cmd_run}[args.cmd](args)
+    return {"models": cmd_models, "selftest": cmd_selftest, "bench": cmd_bench, "run": cmd_run, "gui": cmd_gui}[args.cmd](args)
 
 
 if __name__ == "__main__":

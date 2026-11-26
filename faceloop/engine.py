@@ -8,6 +8,7 @@ the first unfinished batch (and re-runs only that batch).
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import datetime as _dt
 import json
@@ -244,6 +245,54 @@ def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: in
     return cur, biggest
 
 
+def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
+    """Every step's output size, for showing in the GUI before a run.
+
+    Returns {"loop": Size, "lead_in": rows, "cycles": {name: rows}, "finish": rows};
+    a row is {"width", "height", "error", "note"}. `error` is how far the height
+    is from the exact aspect, in pixels."""
+    from .sizes import aspect_error
+
+    def scale_of(st):
+        if st.get("op") == "xbr":
+            return int(st["scale"])
+        info = getattr(models, "catalog", {}).get(st.get("model")) if models is not None else None
+        return (info.scale if info and info.scale else None)
+
+    def run(steps, cur, loop, land, land_label):
+        rows = []
+        for st in steps:
+            note = ""
+            w = st.get("width")
+            tgt = src if w == "source" else (loop if w == "loop" else (size_for(int(w), src) if isinstance(w, int) else None))
+            op = st.get("op")
+            if op in ("model", "xbr"):
+                k = scale_of(st)
+                if k:
+                    note = f"x{k} gives {cur.width * k}x{cur.height * k}"
+                    cur = tgt or Size(cur.width * k, cur.height * k)
+                else:
+                    note = "scale unknown until loaded"
+                    cur = tgt or cur
+            elif op == "chroma":
+                pass
+            elif tgt is not None:
+                cur = tgt
+            rows.append({"width": cur.width, "height": cur.height,
+                         "error": round(aspect_error(cur, src), 3), "note": note})
+        if land is not None and cur != land:
+            rows.append({"width": land.width, "height": land.height, "error": round(aspect_error(land, src), 3),
+                         "note": land_label})
+            cur = land
+        return rows, cur
+
+    lead, loop = run(recipe.lead_in, src, None, None, "")
+    cycles = {k: run(recipe.cycles[k], loop, loop, loop, "area lands on the loop size")[0]
+              for k in dict.fromkeys(recipe.pattern) if k in recipe.cycles}
+    fin, _ = run(recipe.finish, loop, loop, src, "area lands on the source size")
+    return {"loop": loop, "lead_in": lead, "cycles": cycles, "finish": fin}
+
+
 def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int:
     """Frames per batch, from the largest image any step produces."""
     ram = ram or total_ram_bytes()
@@ -268,7 +317,9 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
              batch_size: int | None = None, frame_limit: int | None = None,
              progress: Progress | None = None, controls: Controls | None = None,
              on_contact: Callable | None = None, log: Callable[[str], None] | None = None,
-             write: bool = True) -> PassResult:
+             write: bool = True, contact: bool = True, gpu_lock=None) -> PassResult:
+    """gpu_lock: held around each GPU stretch (lead-in, one cycle, one finish),
+    so another thread (the GUI's estimate) can use the GPU in between."""
     source = Path(source)
     out_root = Path(out_root)
     device = device or pick_device()
@@ -289,6 +340,12 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     transfer = Transfer(curves)
 
     folder = out_root / source.name / recipe.folder_name(gan)
+    recorder = None
+    if write and contact and on_contact is None:
+        from .contact import ContactRecorder
+        recorder = ContactRecorder(folder, recipe)
+        on_contact = recorder
+    lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
     marker_dir = folder / ".batches"
     if write:
         marker_dir.mkdir(parents=True, exist_ok=True)
@@ -362,7 +419,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if a.shape[:2] != (src.height, src.width):
                     raise RecipeError(f"{p.name} is {a.shape[1]}x{a.shape[0]}, expected {src}")
             x = torch.from_numpy(np.stack(arrs)).to(device).permute(0, 3, 1, 2).float() / 255.0
-            x = run_lead_in(x, recipe, ctx)
+            with lock:
+                x = run_lead_in(x, recipe, ctx)
             want = [i for i, p in enumerate(batch) if p.name in contact_names]
 
             for ci in range(1, recipe.iterations + 1):
@@ -373,11 +431,15 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if on_contact and want and last_of_cycle.get(cname) == ci:
                     def capture(step_i, t, _c=cname, _w=want, _b=batch):
                         on_contact(_c, step_i, [_b[i].name for i in _w], to_uint8(t[_w]))
-                x = run_cycle(x, recipe.cycles[cname], ctx, capture)
+                with lock:
+                    if capture:
+                        capture(-1, x)
+                    x = run_cycle(x, recipe.cycles[cname], ctx, capture)
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
-                    u8 = to_uint8(run_finish(x, recipe, ctx))
+                    with lock:
+                        u8 = to_uint8(run_finish(x, recipe, ctx))
                     for p, img in zip(batch, u8):
                         pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
                                                    img, icc, recipe.output))
@@ -388,6 +450,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 marker = marker_dir / f"batch_{int(time.time() * 1000)}_{bi:06d}.json"
                 marker.write_text(json.dumps({"code": recipe.code(), "iterations": recipe.iterations,
                                               "frames": [p.name for p in batch]}))
+            if recorder is not None and want:
+                recorder.build()
             progress.frames_done += len(batch)
             progress.cycle = 0
             _log(f"batch {progress.batch}/{progress.batches} done ({progress.frames_done}/{len(frames)} frames)")

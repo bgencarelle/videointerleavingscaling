@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>faceloop</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #141414; --panel: #1d1d1d; --panel2: #242424; --line: #333; --fg: #e8e8e8;
+    --dim: #9a9a9a; --accent: #e0a040; --ok: #6cbf6c; --bad: #e06060; --gan: #c070e0;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 -apple-system, "Helvetica Neue", sans-serif; }
+  header { display: flex; align-items: center; gap: 24px; padding: 10px 20px; border-bottom: 1px solid var(--line); background: #101010; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  header nav button { background: none; border: none; color: var(--dim); font-size: 14px; padding: 6px 10px; cursor: pointer; border-radius: 6px; }
+  header nav button.on { color: var(--fg); background: var(--panel2); }
+  header .dev { margin-left: auto; color: var(--dim); font-size: 12px; }
+  main { padding: 18px 20px 60px; }
+  .tab { display: none; } .tab.on { display: block; }
+  .build { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  section h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  label.f { color: var(--dim); font-size: 12px; min-width: 90px; }
+  input, select, button { font: inherit; color: var(--fg); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  input[type=checkbox] { padding: 0; }
+  input.path { flex: 1; min-width: 260px; font-family: var(--mono); font-size: 12px; }
+  input.num { width: 80px; }
+  button { cursor: pointer; }
+  button:hover { border-color: #555; }
+  button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+  button.small { padding: 2px 7px; font-size: 12px; }
+  button:disabled { opacity: .45; cursor: default; }
+  .muted { color: var(--dim); font-size: 12px; }
+  .err { color: var(--bad); font-size: 12px; }
+  .steps { display: flex; flex-direction: column; gap: 6px; }
+  .step { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  .step .n { color: var(--dim); width: 18px; font-size: 12px; text-align: right; }
+  .step .size { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--accent); white-space: nowrap; }
+  .step .size .e { color: var(--dim); }
+  .step.land { background: none; border-style: dashed; color: var(--dim); font-size: 12px; }
+  .step select.model { max-width: 330px; }
+  .cycle { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+  .cycle .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .cycle .head b { font-size: 15px; color: var(--accent); }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line); color: var(--dim); }
+  .badge:empty { display: none; }
+  .badge.gan { color: var(--gan); border-color: var(--gan); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.bad { color: var(--bad); border-color: var(--bad); }
+  aside { position: sticky; top: 64px; }
+  .fname { font-family: var(--mono); font-size: 12px; word-break: break-all; background: var(--panel2); padding: 8px; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; width: 160px; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .st-running { color: var(--accent); } .st-done { color: var(--ok); } .st-failed { color: var(--bad); } .st-paused, .st-stopped { color: var(--dim); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--cardw, 520px), 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .card img { width: 100%; border-radius: 4px; display: block; margin-top: 8px; cursor: zoom-in; background: #000; }
+  .card img.sample { width: auto; max-width: 100%; max-height: 320px; }
+  .card .slug { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .card .desc { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  dialog { background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; min-width: 380px; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  dialog h3 { margin: 0 0 10px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+  .kv span:nth-child(odd) { color: var(--dim); }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--dim); border-top-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; vertical-align: -2px; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>faceloop</h1>
+  <nav>
+    <button data-tab="build" class="on">Build</button>
+    <button data-tab="queue">Queue <span id="qcount" class="badge"></span></button>
+    <button data-tab="results">Results</button>
+  </nav>
+  <span class="dev" id="dev"></span>
+</header>
+
+<main>
+<!-- ============================================================ BUILD -->
+<div class="tab on" id="tab-build">
+ <div class="build">
+  <div>
+   <section>
+    <h2>Folders</h2>
+    <div class="row"><label class="f">Source</label>
+      <input class="path" id="src" placeholder="/Users/ben/git/BG_faceSource">
+      <button id="pickSrc">Choose…</button></div>
+    <div class="row"><span class="muted" id="srcInfo"></span></div>
+    <div class="row"><label class="f">Output</label>
+      <input class="path" id="out" placeholder="/Users/ben/faceloop-runs">
+      <button id="pickOut">Choose…</button></div>
+    <div class="row"><label class="f">Name</label><input id="name" placeholder="optional label (goes in the folder name)" style="flex:1"></div>
+   </section>
+
+   <section>
+    <h2>Lead-in <small class="muted">runs once: source → loop size</small></h2>
+    <div class="steps" id="lead"></div>
+    <div class="row"><button class="small" data-add="lead">+ step</button></div>
+   </section>
+
+   <section>
+    <h2>Cycles <small class="muted">each starts and ends at the loop size</small></h2>
+    <div id="cycles"></div>
+    <div class="row"><button class="small" id="addCycle">+ cycle</button></div>
+    <div class="row"><label class="f">Pattern</label>
+      <input id="pattern" style="width:220px" placeholder="A, B">
+      <span class="muted" id="patternView"></span></div>
+    <div class="row">
+      <label class="f">Cycles total</label><input class="num" id="iterations" type="number" min="1" value="200">
+      <label class="f" style="min-width:auto">save every</label><input class="num" id="saveEvery" type="number" min="1" value="25">
+      <span class="muted" id="savesView"></span></div>
+    <div class="row">
+      <label class="f">Rounding</label>
+      <select id="rounding"><option value="srgb">8-bit after each step, like saving a file (sRGB)</option>
+        <option value="linear">8-bit in linear light (harsh shadow banding)</option></select></div>
+    <div class="row">
+      <label class="f">Plain resizes</label>
+      <select id="light"><option value="linear">in linear light</option><option value="encoded">on the stored values</option></select></div>
+   </section>
+
+   <section>
+    <h2>Finish <small class="muted">a copy back to full size at each save; area lands it exactly</small></h2>
+    <div class="steps" id="finish"></div>
+    <div class="row"><button class="small" data-add="finish">+ step</button></div>
+    <div class="row"><label class="f">Saved as</label>
+      <select id="format"><option value="webp">WebP q95 + sharp_yuv</option><option value="png">PNG (lossless)</option></select></div>
+   </section>
+  </div>
+
+  <aside>
+   <section>
+    <h2>This pass</h2>
+    <div class="row"><span class="muted">Loop size</span> <b id="loopSize">–</b> <span id="ganBadge"></span></div>
+    <div class="fname" id="fname">–</div>
+    <div id="errors" class="err" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="estimate">Estimate & queue…</button></div>
+   </section>
+   <section>
+    <h2>Presets</h2>
+    <div class="row"><select id="presetList" style="flex:1"></select><button id="presetLoad">Load</button><button id="presetDel" class="small">Delete</button></div>
+    <div class="row"><input id="presetName" placeholder="preset name" style="flex:1"><button id="presetSave">Save</button></div>
+    <div class="muted" id="presetMsg"></div>
+   </section>
+  </aside>
+ </div>
+</div>
+
+<!-- ============================================================ QUEUE -->
+<div class="tab" id="tab-queue">
+  <section>
+   <h2>Queue <small class="muted">runs one pass after another; finished frames are skipped when a pass continues</small></h2>
+   <table><thead><tr><th>Pass</th><th>Source → output</th><th>Status</th><th>Progress</th><th></th></tr></thead>
+   <tbody id="qbody"></tbody></table>
+  </section>
+</div>
+
+<!-- ============================================================ RESULTS -->
+<div class="tab" id="tab-results">
+  <section>
+   <div class="row"><label class="f">Output folder</label>
+     <input class="path" id="resOut"><button id="resPick">Choose…</button><button id="resLoad">Show</button></div>
+   <div class="row"><label class="f">Filter</label><input id="resFilter" placeholder="e.g. w2x, GAN, near54" style="width:280px">
+     <label class="f" style="min-width:auto">Card size</label>
+     <select id="resSize"><option value="380px">small</option><option value="520px" selected>medium</option><option value="900px">large</option></select>
+     <span class="muted" id="resCount"></span></div>
+  </section>
+  <div class="cards" id="cards"></div>
+</div>
+</main>
+
+<dialog id="dlg"><h3 id="dlgTitle"></h3><div id="dlgBody"></div>
+  <div class="row" style="justify-content:flex-end;margin-top:14px"><button id="dlgCancel">Cancel</button><button class="primary" id="dlgOk">OK</button></div></dialog>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({error: r.statusText}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const fileUrl = p => "/api/file?path=" + encodeURIComponent(p);
+
+// ------------------------------------------------------------------ state
+const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos"];
+const CHROMA = [["420", "4:2:0"], ["422", "4:2:2"], ["411", "4:1:1 (DV)"], ["410", "4:1:0 (YUV9)"]];
+let MODELS = [];
+let state = {
+  name: "",
+  lead_in: [{op: "resize", method: "area", width: 162}],
+  cycles: {A: [{op: "resize", method: "nearest", width: 54}, {op: "resize", method: "bicubic", width: "loop"}]},
+  pattern: ["A"], iterations: 200, save_every: 25,
+  finish: [{op: "resize", method: "bicubic", width: "source"}],
+  rounding: "srgb", light: "linear", output: {format: "webp", quality: 95, sharp_yuv: true},
+};
+let preview = null;
+
+function recipe() {
+  return {name: state.name, lead_in: state.lead_in, cycles: state.cycles, pattern: state.pattern,
+          iterations: state.iterations, save_every: state.save_every, finish: state.finish,
+          rounding: state.rounding, light: state.light, output: state.output};
+}
+
+function defaultStep(op) {
+  if (op === "model") { const m = MODELS.find(m => m.downloaded && m.family !== "dropin") || MODELS[0]; return {op, model: m ? m.id : "", width: null}; }
+  if (op === "xbr") return {op, scale: 2, width: null};
+  if (op === "chroma") return {op, mode: "420"};
+  return {op: "resize", method: "bicubic", width: "loop"};
+}
+
+function parseWidth(v) {
+  v = String(v).trim().toLowerCase();
+  if (v === "") return null;
+  if (v === "source" || v === "loop") return v;
+  const n = parseInt(v, 10);
+  return isNaN(n) ? v : n;
+}
+
+// ------------------------------------------------------------------ step editor
+function modelOptions(sel) {
+  const fam = {}; MODELS.forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
+  let h = "";
+  for (const [f, list] of Object.entries(fam)) {
+    h += `<optgroup label="${esc(f)}">`;
+    for (const m of list) {
+      const tag = m.label === "accuracy" ? "accuracy" : (m.label === "GAN" ? "GAN" : "unlabelled");
+      h += `<option value="${esc(m.id)}" ${m.id === sel ? "selected" : ""} ${m.downloaded ? "" : "disabled"}>${esc(m.id)} · x${m.scale ?? "?"} · ${tag}${m.downloaded ? "" : " (not downloaded)"}</option>`;
+    }
+    h += "</optgroup>";
+  }
+  return h;
+}
+
+function stepHTML(s, i, n) {
+  const opSel = `<select data-k="op">${["resize", "model", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
+  let f = "";
+  const w = `<input data-k="width" style="width:78px" value="${esc(s.width ?? "")}" placeholder="${s.op === "resize" ? "width" : "native"}" title="pixels, 'loop' or 'source'">`;
+  if (s.op === "resize") {
+    f = `<select data-k="method">${KERNELS.map(k => `<option ${s.method === k ? "selected" : ""}>${k}</option>`).join("")}</select> to ${w}`;
+    if (!["nearest", "area"].includes(s.method)) f += `
+      <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
+      <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
+  } else if (s.op === "model") {
+    f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then to ${w}`;
+  } else if (s.op === "xbr") {
+    f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">x${k}</option>`).join("")}</select> then to ${w}`;
+  } else if (s.op === "chroma") {
+    f = `<select data-k="mode">${CHROMA.map(([v, t]) => `<option ${s.mode === v ? "selected" : ""} value="${v}">${t}</option>`).join("")}</select>
+      <select data-k="matrix"><option value="601" ${(s.matrix || "601") === "601" ? "selected" : ""}>BT.601</option><option value="709" ${s.matrix === "709" ? "selected" : ""}>BT.709</option></select>`;
+  }
+  return `<div class="step" data-i="${i}"><span class="n">${i + 1}</span>${opSel}${f}
+    <span class="size" data-size></span>
+    <button class="small" data-mv="-1" ${i === 0 ? "disabled" : ""}>↑</button>
+    <button class="small" data-mv="1" ${i === n - 1 ? "disabled" : ""}>↓</button>
+    <button class="small" data-del>✕</button></div>`;
+}
+
+function renderSteps(el, list) {
+  el.innerHTML = list.map((s, i) => stepHTML(s, i, list.length)).join("") || `<div class="muted">no steps</div>`;
+  el.querySelectorAll(".step").forEach(row => {
+    const i = +row.dataset.i;
+    row.querySelectorAll("[data-k]").forEach(inp => inp.addEventListener("change", () => {
+      const k = inp.dataset.k, s = list[i];
+      if (k === "op") { list[i] = defaultStep(inp.value); render(); return; }
+      if (k === "width") s.width = parseWidth(inp.value);
+      else if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
+      else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
+      else if (k === "scale") s.scale = +inp.value;
+      else s[k] = inp.value;
+      if (k === "method" && ["nearest", "area"].includes(s.method)) { delete s.antialias; delete s.fixed_point; render(); return; }
+      if (k === "method") { render(); return; }
+      if (s.width === null && s.op !== "resize") delete s.width;
+      if (s.matrix === "601") delete s.matrix;
+      changed();
+    }));
+    row.querySelectorAll("[data-mv]").forEach(b => b.addEventListener("click", () => {
+      const j = i + +b.dataset.mv; [list[i], list[j]] = [list[j], list[i]]; render();
+    }));
+    row.querySelector("[data-del]").addEventListener("click", () => { list.splice(i, 1); render(); });
+  });
+}
+
+function renderCycles() {
+  const box = $("#cycles"); box.innerHTML = "";
+  for (const name of Object.keys(state.cycles)) {
+    const d = document.createElement("div"); d.className = "cycle";
+    d.innerHTML = `<div class="head"><b>${esc(name)}</b><span class="muted">cycle</span>
+      <button class="small" data-addc>+ step</button><span style="flex:1"></span>
+      <button class="small" data-delc ${Object.keys(state.cycles).length < 2 ? "disabled" : ""}>remove cycle</button></div>
+      <div class="steps"></div>`;
+    box.appendChild(d);
+    renderSteps($(".steps", d), state.cycles[name]);
+    $("[data-addc]", d).onclick = () => { state.cycles[name].push(defaultStep("resize")); render(); };
+    $("[data-delc]", d).onclick = () => {
+      delete state.cycles[name];
+      state.pattern = state.pattern.filter(p => p !== name);
+      if (!state.pattern.length) state.pattern = [Object.keys(state.cycles)[0]];
+      render();
+    };
+  }
+}
+
+function render() {
+  renderSteps($("#lead"), state.lead_in);
+  renderCycles();
+  renderSteps($("#finish"), state.finish);
+  $("#name").value = state.name;
+  $("#pattern").value = state.pattern.join(", ");
+  $("#iterations").value = state.iterations;
+  $("#saveEvery").value = state.save_every;
+  $("#rounding").value = state.rounding;
+  $("#light").value = state.light;
+  $("#format").value = state.output.format;
+  changed();
+}
+
+// ------------------------------------------------------------------ preview
+let pvTimer = null;
+function changed() {
+  const pv = state.pattern.length ? Array.from({length: Math.min(8, state.iterations)}, (_, i) => state.pattern[i % state.pattern.length]).join(" ") + (state.iterations > 8 ? " …" : "") : "";
+  $("#patternView").textContent = pv;
+  clearTimeout(pvTimer); pvTimer = setTimeout(doPreview, 250);
+}
+
+function sizeText(r) {
+  if (!r) return "";
+  const e = r.error > 0.001 ? ` <span class="e">(height off by ${r.error.toFixed(2)} px)</span>` : "";
+  const note = r.note ? ` <span class="e">${esc(r.note)}</span>` : "";
+  return `→ ${r.width}×${r.height}${e}${note}`;
+}
+
+function putSizes(el, rows, list, landLabel) {
+  const steps = el.querySelectorAll(".step");
+  steps.forEach((row, i) => { const s = row.querySelector("[data-size]"); if (s) s.innerHTML = rows ? sizeText(rows[i]) : ""; });
+  el.querySelectorAll(".land").forEach(x => x.remove());
+  if (rows && rows.length > list.length) {
+    const r = rows[rows.length - 1];
+    el.insertAdjacentHTML("beforeend", `<div class="step land"><span class="n"></span>${esc(r.note)}<span class="size">${sizeText({...r, note: ""})}</span></div>`);
+  }
+}
+
+async function doPreview() {
+  const src = $("#src").value.trim();
+  try { preview = await api("/api/preview", {recipe: recipe(), source: src || null}); }
+  catch (e) { preview = {ok: false, errors: [e.message]}; }
+  const p = preview;
+  $("#errors").innerHTML = (p.errors || []).map(esc).join("<br>");
+  $("#fname").textContent = p.folder ? `${src ? src.split("/").pop() : "<source>"}/${p.folder}` : "–";
+  $("#ganBadge").innerHTML = p.gan ? `<span class="badge gan">GAN</span>` : (p.folder ? `<span class="badge ok">no GAN</span>` : "");
+  $("#savesView").textContent = p.saves ? `saves at ${p.saves.length > 6 ? p.saves.slice(0, 5).join(", ") + " … " + p.saves.at(-1) : p.saves.join(", ")} (${p.saves.length})` : "";
+  const sz = p.sizes;
+  $("#loopSize").textContent = sz ? `${sz.loop[0]}×${sz.loop[1]}` : "–";
+  putSizes($("#lead"), sz && sz.lead_in, state.lead_in);
+  document.querySelectorAll("#cycles .cycle").forEach((d, k) => {
+    const name = Object.keys(state.cycles)[k];
+    putSizes($(".steps", d), sz && sz.cycles[name], state.cycles[name]);
+  });
+  putSizes($("#finish"), sz && sz.finish, state.finish);
+  $("#estimate").disabled = !(p.ok && src && $("#out").value.trim());
+}
+
+// ------------------------------------------------------------------ inputs
+function bind() {
+  $("#name").oninput = e => { state.name = e.target.value; changed(); };
+  $("#pattern").onchange = e => {
+    const names = e.target.value.split(/[\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+    state.pattern = names.length ? names : state.pattern; render();
+  };
+  $("#iterations").onchange = e => { state.iterations = Math.max(1, +e.target.value || 1); changed(); };
+  $("#saveEvery").onchange = e => { state.save_every = Math.max(1, +e.target.value || 1); changed(); };
+  $("#rounding").onchange = e => { state.rounding = e.target.value; changed(); };
+  $("#light").onchange = e => { state.light = e.target.value; changed(); };
+  $("#format").onchange = e => { state.output = e.target.value === "png" ? {format: "png"} : {format: "webp", quality: 95, sharp_yuv: true}; changed(); };
+  document.querySelectorAll("[data-add]").forEach(b => b.onclick = () => {
+    (b.dataset.add === "lead" ? state.lead_in : state.finish).push(defaultStep("resize")); render();
+  });
+  $("#addCycle").onclick = () => {
+    const used = Object.keys(state.cycles); const name = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").find(c => !used.includes(c));
+    if (!name) return;
+    state.cycles[name] = [defaultStep("resize")]; state.pattern.push(name); render();
+  };
+  $("#src").onchange = () => loadSource();
+  $("#out").onchange = () => changed();
+  $("#pickSrc").onclick = async () => { const r = await api("/api/pick_folder", {prompt: "Source frames"}).catch(e => alert(e.message)); if (r && r.path) { $("#src").value = r.path; loadSource(); } };
+  $("#pickOut").onclick = async () => { const r = await api("/api/pick_folder", {prompt: "Output folder"}).catch(e => alert(e.message)); if (r && r.path) { $("#out").value = r.path; changed(); } };
+  $("#estimate").onclick = estimateAndQueue;
+  $("#presetSave").onclick = async () => {
+    try { const r = await api("/api/presets/save", {name: $("#presetName").value, recipe: recipe()}); $("#presetMsg").textContent = `saved "${r.name}"`; loadPresets(r.name); }
+    catch (e) { $("#presetMsg").textContent = e.message; }
+  };
+  $("#presetLoad").onclick = async () => {
+    const n = $("#presetList").value; if (!n) return;
+    const r = await api("/api/presets/load", {name: n}); loadRecipe(r); $("#presetName").value = n; $("#presetMsg").textContent = `loaded "${n}"`;
+  };
+  $("#presetDel").onclick = async () => {
+    const n = $("#presetList").value; if (!n || !confirm(`Delete preset "${n}"?`)) return;
+    await api("/api/presets/delete", {name: n}); loadPresets();
+  };
+  document.querySelectorAll("header nav button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+  $("#resLoad").onclick = loadResults;
+  $("#resPick").onclick = async () => { const r = await api("/api/pick_folder", {prompt: "Output folder"}).catch(e => alert(e.message)); if (r && r.path) { $("#resOut").value = r.path; loadResults(); } };
+  $("#resFilter").oninput = renderResults;
+  $("#resSize").onchange = e => $("#cards").style.setProperty("--cardw", e.target.value);
+}
+
+function loadRecipe(r) {
+  state = {name: r.name || "", lead_in: r.lead_in, cycles: r.cycles, pattern: r.pattern,
+           iterations: r.iterations, save_every: r.save_every, finish: r.finish || [],
+           rounding: r.rounding || "srgb", light: r.light || "linear",
+           output: r.output || {format: "webp", quality: 95, sharp_yuv: true}};
+  render();
+}
+
+async function loadSource() {
+  const p = $("#src").value.trim();
+  if (!p) { $("#srcInfo").textContent = ""; changed(); return; }
+  try {
+    const i = await api("/api/source", {path: p});
+    $("#srcInfo").textContent = `${i.frames} frames · ${i.width}×${i.height} · ${i.profile ? "colour profile embedded" : "no colour profile (treated as sRGB)"} · ${i.first} … ${i.last}`;
+    $("#srcInfo").className = "muted";
+  } catch (e) { $("#srcInfo").textContent = e.message; $("#srcInfo").className = "err"; }
+  changed();
+}
+
+async function loadPresets(select) {
+  const r = await api("/api/presets");
+  $("#presetList").innerHTML = r.presets.map(n => `<option ${n === select ? "selected" : ""}>${esc(n)}</option>`).join("") || `<option value="">no presets yet</option>`;
+}
+
+// ------------------------------------------------------------------ estimate + queue
+function dialog(title, html, okText) {
+  return new Promise(res => {
+    const d = $("#dlg"); $("#dlgTitle").textContent = title; $("#dlgBody").innerHTML = html;
+    $("#dlgOk").textContent = okText || "OK"; $("#dlgOk").style.display = okText === null ? "none" : "";
+    $("#dlgOk").onclick = () => { d.close(); res(true); };
+    $("#dlgCancel").onclick = () => { d.close(); res(false); };
+    d.showModal();
+  });
+}
+
+async function estimateAndQueue() {
+  const src = $("#src").value.trim(), out = $("#out").value.trim();
+  const d = $("#dlg");
+  $("#dlgTitle").textContent = "Measuring…";
+  $("#dlgBody").innerHTML = `<span class="spin"></span> timing one batch on the GPU (models load first; this can take a minute)`;
+  $("#dlgOk").style.display = "none"; $("#dlgCancel").onclick = () => d.close(); d.showModal();
+  let est;
+  try { est = await api("/api/estimate", {recipe: recipe(), source: src}); }
+  catch (e) { $("#dlgTitle").textContent = "Couldn't estimate"; $("#dlgBody").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  d.close();
+  const ok = await dialog("Queue this pass?", `<div class="kv">
+      <span>Estimated time</span><b>${esc(est.est_text)}</b>
+      <span>Disk</span><span>${esc(est.disk_text)} (${est.saves} saved loops)</span>
+      <span>Frames</span><span>${est.frames} at ${esc(est.size)}, loop size ${esc(est.loop)}</span>
+      <span>Per cycle</span><span>${(est.sec_per_frame_cycle * 1000).toFixed(1)} ms per frame</span>
+      <span>Per save</span><span>${(est.sec_per_frame_finish * 1000).toFixed(1)} ms per frame (finish)</span>
+      <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}</span>
+    </div>`, "Add to queue");
+  if (!ok) return;
+  try {
+    await api("/api/queue/add", {recipe: recipe(), source: src, out, estimate: {text: est.est_text, disk: est.disk_text}});
+    showTab("queue");
+  } catch (e) { alert(e.message); }
+}
+
+// ------------------------------------------------------------------ queue tab
+let qTimer = null;
+async function loadQueue() {
+  let r; try { r = await api("/api/queue"); } catch (e) { return; }
+  const active = r.jobs.filter(j => ["queued", "running", "paused"].includes(j.status)).length;
+  $("#qcount").textContent = active || "";
+  $("#qbody").innerHTML = r.jobs.map((j, i) => {
+    const p = j.progress;
+    const bar = p ? `<div class="bar"><i style="width:${(p.fraction * 100).toFixed(1)}%"></i></div>
+        <div class="muted">${(p.fraction * 100).toFixed(1)}% · ${p.frames_done}/${p.frames} frames · batch ${p.batch}/${p.batches}, cycle ${p.cycle}${p.eta ? " · " + esc(p.eta) + " left" : ""}</div>`
+      : (j.estimate ? `<span class="muted">estimate ${esc(j.estimate.text)}, ${esc(j.estimate.disk)}</span>` : "");
+    const btn = (a, t) => `<button class="small" data-q="${a}" data-id="${j.id}">${t}</button>`;
+    let b = "";
+    if (j.status === "running") b = btn("pause", "Pause") + btn("stop", "Stop");
+    else if (j.status === "paused") b = btn("resume", "Resume") + btn("stop", "Stop");
+    else {
+      if (["stopped", "failed", "done"].includes(j.status)) b += btn("requeue", j.status === "done" ? "Run again" : "Continue");
+      b += btn("up", "↑") + btn("down", "↓") + btn("remove", "Remove");
+    }
+    return `<tr><td><div class="slug" style="font-family:var(--mono);font-size:12px">${esc(j.name ? j.name + " · " : "")}${esc(j.slug)}</div><div class="muted">${j.iterations} cycles · added ${esc(j.created)}</div></td>
+      <td class="muted" style="font-family:var(--mono);font-size:11px">${esc(j.source)}<br>→ ${esc(j.out)}</td>
+      <td class="st-${j.status}"><b>${j.status}</b><div class="muted">${esc(j.message)}</div></td>
+      <td>${bar}</td><td style="white-space:nowrap">${b}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">Nothing queued. Build a pass and press “Estimate & queue…”.</td></tr>`;
+  document.querySelectorAll("[data-q]").forEach(x => x.onclick = async () => {
+    if (x.dataset.q === "remove" && !confirm("Remove this job from the queue? (Its files stay.)")) return;
+    try { await api("/api/queue/action", {id: x.dataset.id, action: x.dataset.q}); } catch (e) { alert(e.message); }
+    loadQueue();
+  });
+}
+
+// ------------------------------------------------------------------ results tab
+let RESULTS = [];
+async function loadResults() {
+  try {
+    const r = await api("/api/results?out=" + encodeURIComponent($("#resOut").value.trim()));
+    $("#resOut").value = r.out; RESULTS = r.passes; renderResults();
+  } catch (e) { $("#cards").innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+function renderResults() {
+  const f = $("#resFilter").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const list = RESULTS.filter(p => f.every(t => (p.slug + " " + p.name + " " + p.source + " " + p.description + (p.gan === "yes" ? " gan" : "")).toLowerCase().includes(t)));
+  $("#resCount").textContent = `${list.length} of ${RESULTS.length} passes`;
+  $("#cards").innerHTML = list.map((p, i) => `<div class="card">
+      <div class="row" style="margin:0"><b>${esc(p.name || p.source)}</b>
+        ${p.complete ? `<span class="badge ok">complete</span>` : `<span class="badge">in progress / stopped</span>`}
+        ${p.gan === "yes" ? `<span class="badge gan">GAN</span>` : ""}
+        <span style="flex:1"></span><button class="small" data-use="${RESULTS.indexOf(p)}">Load into Build</button></div>
+      <div class="slug">${esc(p.source)}/${esc(p.slug)}_${esc(p.code)}</div>
+      <div class="desc">${esc(p.description)}</div>
+      <div class="desc">saved loops: ${p.saves.map(s => "c" + s).join(", ") || "none yet"}</div>
+      ${p.contact.map(c => `<a href="${fileUrl(c)}" target="_blank"><img loading="lazy" src="${fileUrl(c)}" title="${esc(c.split("/").pop())}"></a>`).join("")}
+      ${p.sample ? `<div class="desc" style="margin-top:6px">last saved frame:</div><a href="${fileUrl(p.sample)}" target="_blank"><img class="sample" loading="lazy" src="${fileUrl(p.sample)}"></a>` : ""}
+    </div>`).join("") || `<div class="muted">No passes here yet.</div>`;
+  document.querySelectorAll("[data-use]").forEach(b => b.onclick = () => { loadRecipe(RESULTS[+b.dataset.use].recipe); showTab("build"); });
+}
+
+// ------------------------------------------------------------------ tabs + start
+function showTab(t) {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x.id === "tab-" + t));
+  document.querySelectorAll("header nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  clearInterval(qTimer);
+  if (t === "queue") { loadQueue(); qTimer = setInterval(loadQueue, 1500); }
+  if (t === "results") { if (!$("#resOut").value) $("#resOut").value = $("#out").value; loadResults(); }
+}
+
+(async function start() {
+  bind();
+  const m = await api("/api/models"); MODELS = m.models; $("#dev").textContent = "device: " + m.device;
+  const s = await api("/api/settings");
+  $("#src").value = s.source || ""; $("#out").value = s.out || ""; $("#resOut").value = s.out || "";
+  render(); loadPresets();
+  if (s.source) loadSource();
+  setInterval(async () => { try { const r = await api("/api/queue"); $("#qcount").textContent = r.jobs.filter(j => ["queued","running","paused"].includes(j.status)).length || ""; } catch (e) {} }, 5000);
+})();
+</script>
+</body>
+</html>

@@ -3,8 +3,43 @@
 Repeatedly downscale and upscale an image sequence, on the Apple Silicon GPU.
 Every decision is recorded in [SPEC.md](SPEC.md).
 
-This first version has the engine and the models, driven from the Terminal.
-The browser GUI comes in a later stage.
+## The GUI
+
+Double-click `faceloop.command` in Finder, or run:
+
+```bash
+.venv/bin/python -m faceloop gui
+```
+
+It opens `http://127.0.0.1:8765` in your browser. The page is served only to
+this Mac. Close it with Ctrl-C in the Terminal window. Queued and stopped
+passes are still there next time.
+
+- **Build:** choose the source and output folders, then build the pass:
+  - lead-in steps (once, down to the loop size)
+  - one or more cycles of steps (each step is a method plus a size)
+  - the pattern (e.g. `A, B`), the number of cycles, and how often to save
+  - the finish (a copy back to full size at each save)
+
+  Every step shows the size it produces, and the folder name updates as you
+  go. Save and load your own presets. "Estimate & queue…" times one batch on
+  the GPU, shows hours and disk space, and asks before adding the pass to
+  the queue.
+- **Queue:** passes run one after another, with progress and time left.
+  - Pause/Resume holds between cycles without losing anything.
+  - Stop ends after the current step; Continue picks up where it stopped
+    (finished frames are skipped).
+- **Results:** every pass in an output folder, filterable. Each card shows a
+  contact sheet per cycle and the last saved frame. "Load into Build" copies
+  a pass's recipe back to the Build tab, ready to tweak.
+
+**Contact sheets:** each pass has a `contact_A.png` (B, ...) for the last run
+of each cycle. Rows are the same randomly chosen frames for every pass of a
+source; columns are the cycle's start and every step, each scaled with
+nearest so small sizes show their real pixels.
+
+The Terminal commands below still work; recipes are the same JSON the GUI
+saves as presets (in `presets/`).
 
 ## Setup (once)
 

@@ -6,3 +6,4 @@ weights/
 runs/
 *.part
 .DS_Store
+state/
