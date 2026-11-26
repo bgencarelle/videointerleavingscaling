@@ -552,7 +552,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                  f" = {fc:,} frame-cycles in {dt:.1f}s ({dt / fc * 1000:.2f} ms each)"
                  f" · {progress.images_saved - saved_before} images saved"
                  f" · total {progress.frames_done}/{len(frames)} frames, {progress.frame_cycles:,} frame-cycles,"
-                 f" {progress.images_saved:,} images" + (f" · ~{_fmt_eta(eta)} left" if eta else ""))
+                 f" {progress.images_saved:,} images · {_fmt_eta(time.time() - t0)} elapsed"
+                 + (f" · ~{_fmt_eta(eta)} left" if eta else ""))
     except StopRequested:
         stopped = True
         _log("stopped; the current batch will be redone on resume")

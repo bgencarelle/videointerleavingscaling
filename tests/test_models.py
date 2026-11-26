@@ -207,3 +207,23 @@ def test_waifu2x_half_precision_is_close():
     b = mm.get("w2x-cunet", dev, "fp16")(x)
     assert b.dtype == torch.float32
     assert float((a - b).abs().mean()) < 2 / 255
+
+
+def test_half_precision_falls_back_when_a_model_mixes_types():
+    """Like SwinIR: builds a float32 tensor inside forward, so converting the
+    weights to half fails; autocast (or full precision) must take over."""
+    class Mixed(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = torch.nn.Conv2d(3, 3, 1)
+
+        def forward(self, x):
+            y = self.conv(x)
+            mask = torch.ones(y.shape[-1], y.shape[-1])  # float32, whatever the weights are
+            return NearestX2()(torch.matmul(y, mask) / y.shape[-1])
+
+    r = ModelRunner(ModelInfo("m", "dropin", "accuracy", 2, ""), Mixed(), 2, torch.device("cpu"))
+    ModelManager._make_half(ModelManager.__new__(ModelManager), r)
+    assert "autocast" in r.precision_label or r.precision_label.startswith("float32")
+    y = r(torch.rand(1, 3, 8, 8))
+    assert y.shape == (1, 3, 16, 16) and y.dtype == torch.float32

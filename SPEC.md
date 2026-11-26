@@ -111,8 +111,16 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   current one. Tested: one frame per batch and 8 frames per batch give
   byte-identical output.
 - **Model precision** (per pass): `precision: "fp16"` runs AI models in
-  half precision: float16 where the model supports it (all waifu2x /
-  Real-CUGAN ports, ESRGAN, Compact), else bfloat16 (SwinIR), else full.
+  half precision. Each model gets the first way that passes a test run when
+  it loads:
+  1. weights converted to float16 (bfloat16 where spandrel says the model
+     needs it)
+  2. torch.autocast with float16, then bfloat16. Needed for SwinIR, which
+     builds float32 attention masks inside.
+  3. full precision
+
+  Measured on CPU: about 0.1/255 average difference for the conv models,
+  about 0.7/255 for SwinIR under bfloat16 autocast.
   - The log says which each model got.
   - The original waifu2x-ncnn-vulkan also used fp16 storage by default.
   - It changes pixels, so it's part of the code; flag `h16`.
@@ -184,6 +192,8 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
    - It shares a lock with the running pass, which waits between cycles.
    - It shows time, disk and the per-step table, and queues on confirmation.
    - Stop on a running pass also takes effect between steps now.
+   - The queue shows elapsed time for a running pass and how long a
+     finished one ran; the log lines include elapsed time too.
 3. **Queue:** `state/queue.json`, run one at a time. Pause/resume between
    cycles; stop; continue/run again; reorder; remove. A pass that was
    running when the app quit is queued again and resumes from the

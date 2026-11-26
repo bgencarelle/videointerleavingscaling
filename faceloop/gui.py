@@ -156,7 +156,15 @@ class Queue:
                                      "frames_done": p.frames_done, "frames": p.frames_total,
                                      "batch": p.batch, "batches": p.batches, "cycle": p.cycle,
                                      "frame_cycles": p.frame_cycles, "images": p.images_saved,
-                                     "total_frame_cycles": p.frames_total * p.cycles}
+                                     "total_frame_cycles": p.frames_total * p.cycles,
+                                     "elapsed": _fmt_secs(time.time() - p.started)}
+                elif j.get("started") and j.get("finished"):
+                    try:
+                        took = (_dt.datetime.fromisoformat(j["finished"]) -
+                                _dt.datetime.fromisoformat(j["started"])).total_seconds()
+                        d["took"] = _fmt_secs(took)
+                    except ValueError:
+                        pass
                 out.append(d)
             return out
 

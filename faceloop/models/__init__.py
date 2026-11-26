@@ -76,6 +76,8 @@ class ModelRunner:
         self.multiple_of = multiple_of
         self.minimum = minimum
         self.dtype = dtype
+        self.autocast: torch.dtype | None = None  # run under torch.autocast with this dtype
+        self.precision_label = "float32"
         self.micro = 16
         self.tile: int | None = None
 
@@ -91,7 +93,11 @@ class ModelRunner:
     @torch.no_grad()
     def _run(self, x):
         xp, h, w = self._pad_req(x)
-        y = self.module(xp.to(self.dtype)).float()
+        if self.autocast is not None:
+            with torch.autocast(device_type=self.device.type, dtype=self.autocast):
+                y = self.module(xp).float()
+        else:
+            y = self.module(xp.to(self.dtype)).float()
         return y[..., :h * self.scale, :w * self.scale]
 
     def _run_tiled(self, x, tile, overlap=16):
@@ -257,8 +263,7 @@ class ModelManager:
                 return self._loaded[key]
             runner = self._load(mid, device)
             if precision == "fp16":
-                runner.dtype = self._half_dtype(runner)
-                runner.module = runner.module.to(runner.dtype)
+                self._make_half(runner)
             self._loaded[key] = runner
             while len(self._loaded) > self._keep:
                 self._loaded.popitem(last=False)
@@ -276,10 +281,43 @@ class ModelManager:
             return torch.bfloat16
         return torch.float32
 
+    @staticmethod
+    def _probe(runner: ModelRunner) -> bool:
+        try:
+            with torch.no_grad():
+                y = runner._run(torch.rand(1, 3, 32, 32, device=runner.device))
+            if runner.device.type == "mps":
+                torch.mps.synchronize()
+            return bool(torch.isfinite(y).all())
+        except (RuntimeError, TypeError, NotImplementedError):
+            return False
+
+    def _make_half(self, runner: ModelRunner) -> None:
+        """Half precision, the first way that works for this model on this device:
+        weights converted to float16/bfloat16; else torch.autocast (each op
+        picks its type, for models that build float32 tensors inside, like
+        SwinIR's attention mask); else full precision."""
+        half = self._half_dtype(runner)
+        if half != torch.float32:
+            runner.module = runner.module.to(half)
+            runner.dtype = half
+            if self._probe(runner):
+                runner.precision_label = str(half).replace("torch.", "")
+                return
+            runner.module = runner.module.float()
+            runner.dtype = torch.float32
+        for ac in (torch.float16, torch.bfloat16):
+            runner.autocast = ac
+            if self._probe(runner):
+                runner.precision_label = str(ac).replace("torch.", "") + " (autocast)"
+                return
+        runner.autocast = None
+        runner.precision_label = "float32 (half precision doesn't work for this model here)"
+
     def precision_of(self, mid: str, device: torch.device, precision: str) -> str:
         if precision != "fp16":
-            return "fp32"
-        return str(self.get(mid, device, precision).dtype).replace("torch.", "")
+            return "float32"
+        return self.get(mid, device, precision).precision_label
 
     def _load(self, mid: str, device: torch.device) -> ModelRunner:
         if mid not in self.catalog:

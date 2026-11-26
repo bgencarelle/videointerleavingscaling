@@ -526,11 +526,12 @@ async function loadQueue() {
   $("#qbody").innerHTML = r.jobs.map((j, i) => {
     const p = j.progress;
     const bar = p ? `<div class="bar"><i style="width:${(p.fraction * 100).toFixed(1)}%"></i></div>
-        <div class="muted">${(p.fraction * 100).toFixed(1)}%${p.eta ? " · " + esc(p.eta) + " left" : ""}</div>
+        <div class="muted">${(p.fraction * 100).toFixed(1)}% · ${esc(p.elapsed)} elapsed${p.eta ? " · " + esc(p.eta) + " left" : ""}</div>
         <div class="muted">batch ${p.batch}/${p.batches}, cycle ${p.cycle} of ${j.iterations}</div>
         <div class="muted">processed ${p.frame_cycles.toLocaleString()} of ${p.total_frame_cycles.toLocaleString()} frame-cycles · ${p.images.toLocaleString()} images saved</div>
         <div class="muted">${p.frames_done}/${p.frames} frames finished</div>`
-      : (j.estimate ? `<span class="muted">estimate ${esc(j.estimate.text)}, ${esc(j.estimate.disk)}</span>` : "");
+      : (j.took ? `<span class="muted">ran for ${esc(j.took)}${j.estimate ? " (estimate was " + esc(j.estimate.text) + ")" : ""}</span>`
+         : (j.estimate ? `<span class="muted">estimate ${esc(j.estimate.text)}, ${esc(j.estimate.disk)}</span>` : ""));
     const btn = (a, t) => `<button class="small" data-q="${a}" data-id="${j.id}">${t}</button>`;
     let b = "";
     if (j.status === "running") b = btn("pause", "Pause") + btn("stop", "Stop");
