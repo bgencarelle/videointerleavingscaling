@@ -152,7 +152,9 @@ class Queue:
                     p = self.progress
                     d["progress"] = {"fraction": p.fraction(), "eta": _fmt_secs(p.eta_seconds()),
                                      "frames_done": p.frames_done, "frames": p.frames_total,
-                                     "batch": p.batch, "batches": p.batches, "cycle": p.cycle}
+                                     "batch": p.batch, "batches": p.batches, "cycle": p.cycle,
+                                     "frame_cycles": p.frame_cycles, "images": p.images_saved,
+                                     "total_frame_cycles": p.frames_total * p.cycles}
                 out.append(d)
             return out
 

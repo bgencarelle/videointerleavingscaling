@@ -162,6 +162,8 @@ class Progress:
     cycles: int = 0
     started: float = field(default_factory=time.time)
     message: str = ""
+    frame_cycles: int = 0   # frames x cycles actually processed in this run
+    images_saved: int = 0   # saved frames written in this run
 
     def fraction(self) -> float:
         if not self.frames_total or not self.cycles:
@@ -208,6 +210,13 @@ class Controls:
         self._run.wait()
         if self.stop_requested:
             raise StopRequested()
+
+
+def _fmt_eta(s: float) -> str:
+    s = int(round(s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}h {m:02d}m" if h else (f"{m}m {sec:02d}s" if m else f"{sec}s")
 
 
 class StopRequested(Exception):
@@ -413,6 +422,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     try:
         for bi in range(0, len(todo), bs):
             batch = todo[bi:bi + bs]
+            tb = time.time()
+            saved_before = progress.images_saved
             progress.batch = bi // bs + 1
             arrs = list(pool.map(lambda p: load_frame(p)[0], batch))
             for p, a in zip(batch, arrs):
@@ -435,12 +446,14 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                     if capture:
                         capture(-1, x)
                     x = run_cycle(x, recipe.cycles[cname], ctx, capture)
+                progress.frame_cycles += len(batch)
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
                     with lock:
                         u8 = to_uint8(run_finish(x, recipe, ctx))
                     for p, img in zip(batch, u8):
+                        progress.images_saved += 1
                         pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
                                                    img, icc, recipe.output))
             for f in pending:
@@ -454,7 +467,14 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 recorder.build()
             progress.frames_done += len(batch)
             progress.cycle = 0
-            _log(f"batch {progress.batch}/{progress.batches} done ({progress.frames_done}/{len(frames)} frames)")
+            dt = time.time() - tb
+            fc = len(batch) * recipe.iterations
+            eta = progress.eta_seconds()
+            _log(f"batch {progress.batch}/{progress.batches} done: {len(batch)} frames x {recipe.iterations} cycles"
+                 f" = {fc:,} frame-cycles in {dt:.1f}s ({dt / fc * 1000:.2f} ms each)"
+                 f" · {progress.images_saved - saved_before} images saved"
+                 f" · total {progress.frames_done}/{len(frames)} frames, {progress.frame_cycles:,} frame-cycles,"
+                 f" {progress.images_saved:,} images" + (f" · ~{_fmt_eta(eta)} left" if eta else ""))
     except StopRequested:
         stopped = True
         _log("stopped; the current batch will be redone on resume")
@@ -469,7 +489,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     secs = time.time() - t0
     if write and not stopped:
         _update_catalog(out_root, source, folder, recipe, gan, src, len(frames))
-        _log(f"pass complete in {secs / 60:.1f} min")
+        _log(f"pass complete in {_fmt_eta(secs)}: {progress.frame_cycles:,} frame-cycles, {progress.images_saved:,} images saved")
     return PassResult(folder=folder, frames=len(frames), seconds=secs, skipped_frames=skipped, stopped=stopped)
 
 
