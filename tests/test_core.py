@@ -279,20 +279,42 @@ def test_cycles_chain_and_saves_are_full_size(tmp_path):
         assert im.size == (64, 48)
 
 
-def test_pattern_must_settle():
+def test_growing_patterns_get_the_lead_in_only_where_needed():
     from faceloop.engine import check_pattern, simulate_pattern
-    grows = _recipe(cycles={"A": [{"op": "xbr", "scale": 2}]}, pattern=["A"])
-    with pytest.raises(RecipeError):
-        check_pattern(grows, Size(64, 48))
+    # settles on its own: nothing added
     ok = _recipe(cycles={"A": [{"op": "resize", "method": "nearest", "width": 8}, {"op": "xbr", "scale": 4}],
                          "B": [{"op": "resize", "method": "area", "width": "loop"}]}, pattern=["A", "B"])
-    check_pattern(ok, Size(64, 48))
+    cycles, auto = check_pattern(ok, Size(64, 48))
+    assert auto == set() and cycles == ok.cycles
     sim = simulate_pattern(ok, Size(64, 48))
     assert sim["starts"]["B"] == Size(32, 24) and sim["starts"]["A"] == Size(32, 24)
-    one = _recipe(cycles={"A": [{"op": "resize", "method": "nearest", "width": 8}, {"op": "xbr", "scale": 2}]},
-                  pattern=["A"])
-    check_pattern(one, Size(64, 48))  # starts with its own resize: settles at 16x12
-    assert simulate_pattern(one, Size(64, 48))["end"] == Size(16, 12)
+    # one cycle with a fixed size is enough: A grows, B resets it, nothing added
+    mixed = _recipe(cycles={"A": [{"op": "xbr", "scale": 2}],
+                            "B": [{"op": "resize", "method": "nearest", "width": 8}]}, pattern=["A", "A", "B"])
+    assert check_pattern(mixed, Size(64, 48))[1] == set()
+    # no fixed size anywhere: would grow; the first cycle of the pattern gets the lead-in
+    grows = _recipe(cycles={"A": [{"op": "xbr", "scale": 2}], "C": [{"op": "chroma", "mode": "420"}]},
+                    pattern=["C", "A"])
+    cycles, auto = check_pattern(grows, Size(64, 48))
+    assert auto == {"C"}
+    assert cycles["C"] == grows.lead_in + [{"op": "chroma", "mode": "420"}] and cycles["A"] == grows.cycles["A"]
+    # truly too big is still refused
+    huge = _recipe(cycles={"A": [{"op": "resize", "method": "area", "width": 400}]}, pattern=["A"])
+    with pytest.raises(RecipeError):
+        check_pattern(huge, Size(64, 48))
+
+
+def test_auto_lead_in_runs_and_is_labelled(tmp_path):
+    src, _ = _make_source(tmp_path)
+    r = _recipe(cycles={"A": [{"op": "xbr", "scale": 2}]}, pattern=["A"], iterations=4, save_every=2)
+    lines = []
+    res = run_pass(r, src, tmp_path / "out", device=torch.device("cpu"), batch_size=8, log=lines.append)
+    assert any("start with the lead-in" in line for line in lines)
+    assert len(list((res.folder / "c0004").glob("*.webp"))) == 8
+    from faceloop.contact import ContactRecorder
+    rec = ContactRecorder(res.folder, r)
+    rec.cycles, rec.auto, rec.n_lead = {"A": r.lead_in + r.cycles["A"]}, {"A"}, 1
+    assert rec.labels("A")[1].startswith("(lead-in)")
 
 
 def test_lead_in_cannot_use_loop_width():

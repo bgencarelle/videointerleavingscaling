@@ -23,10 +23,15 @@ contact sheets, GUI.
      - The first cycle starts at the loop size. After that, each cycle ends
        wherever its last step ends, and the next cycle's first step takes it
        from there; there's no automatic resize in between.
-     - The sizes must settle into a repeating pattern, checked before a run
-       and shown in the GUI. A pattern whose frames keep growing (say ×2 with
-       nothing resizing back), or that gets bigger than 16× the source's
-       pixels, is refused.
+     - The sizes must settle into a repeating pattern. They always do if any
+       cycle has a step with a fixed size. If none does (e.g. only ×2 and
+       colour steps), the first cycle of the pattern starts with the
+       lead-in steps, added automatically: that one fixed point is enough,
+       and nothing is added otherwise.
+     - Build shows these as dashed rows ("lead-in, added automatically"),
+       the run log says so, and contact sheet columns are marked
+       "(lead-in)".
+     - Patterns bigger than 16× the source's pixels are refused.
      - (Until version 5 every cycle was landed back on the loop size with
        area. That threw away the last step's detail and repeated the resize
        the next cycle does anyway.)

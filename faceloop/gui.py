@@ -305,7 +305,8 @@ class App:
                 info = self.source_info(src)
                 p = plan_sizes(r, Size(info["width"], info["height"]), self.models)
                 out["sizes"] = {"loop": [p["loop"].width, p["loop"].height], "lead_in": p["lead_in"],
-                                "cycles": p["cycles"], "finish": p["finish"], "cycle_starts": p["cycle_starts"]}
+                                "cycles": p["cycles"], "finish": p["finish"], "cycle_starts": p["cycle_starts"],
+                                "cycle_auto": p["cycle_auto"]}
                 try:
                     from .engine import check_pattern
                     check_pattern(r, Size(info["width"], info["height"]), self.models)

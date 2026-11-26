@@ -139,8 +139,8 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     import io
     import numpy as np
     from .colour import Transfer, curves_from_icc
-    from .engine import (StepContext, apply_step, batch_sizes, finish_chunked, lead_in_chunked,
-                         pick_device, run_cycle, _kernel)
+    from .engine import (StepContext, apply_step, batch_sizes, check_pattern, finish_chunked,
+                         lead_in_chunked, pick_device, run_cycle, _kernel)
     from .colour import quantize
     from .imageio import list_frames, load_frame, probe, webp_backend
     from .kernels import KernelResizer
@@ -152,6 +152,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         raise SystemExit(f"no frames in {source}")
     w, h, icc = probe(allf[0])
     src = Size(w, h)
+    cycles_eff, _ = check_pattern(recipe, src, models)
     bs, chunk = batch_sizes(src, recipe, models=models)
     n_max = max(1, min(frames or 64, bs, len(allf)))
     n_warm = min(4, n_max)
@@ -175,12 +176,12 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     x = lead_in_chunked(arrs, recipe, ctx, chunk, device)
     for k in dict.fromkeys(recipe.pattern):
         check()
-        x = run_cycle(x, recipe.cycles[k], ctx)
+        x = run_cycle(x, cycles_eff[k], ctx)
     sync()
     t = time.time()
     for k in dict.fromkeys(recipe.pattern):
         check()
-        x = run_cycle(x, recipe.cycles[k], ctx)
+        x = run_cycle(x, cycles_eff[k], ctx)
     sync()
     rough = (time.time() - t) / (plen * n_warm)  # seconds per frame-cycle
     # sample size: the timed cycles should take about half the budget
@@ -199,7 +200,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     for i in range(1, cycles + 1):
         check()
         say(f"timing cycle {i} of {cycles} on {n} frames")
-        x = run_cycle(x, recipe.cycles[recipe.cycle_at(i)], ctx)
+        x = run_cycle(x, cycles_eff[recipe.cycle_at(i)], ctx)
         done = i
         sync()
         if time.time() - t_start > budget and i >= plen:
@@ -227,7 +228,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         k_prof = min(n, 8)
         for k in dict.fromkeys(recipe.pattern):
             xx = x0[:k_prof]
-            for st in recipe.cycles[k]:
+            for st in cycles_eff[k]:
                 check()
                 xx = timed((f"cycle {k}", step_label(st)), lambda a, st=st: apply_step(a, st, ctx), xx)
         cyc_total = sum(st["ms"] for st in steps) or 1.0

@@ -371,13 +371,20 @@ function sizeText(r) {
   return `→ ${dim(r.width, r.height)}${change(r.from, r.width)}${e}${note}`;
 }
 
+function putAuto(el, rows) {
+  el.querySelectorAll(".auto").forEach(x => x.remove());
+  if (!rows || !rows.length) return;
+  el.insertAdjacentHTML("afterbegin", rows.map(r => `<div class="step land auto"><span class="n"></span>
+    <div class="ctl">${esc(r.note)}</div><span class="size">${sizeText({...r, note: ""})}</span><span></span></div>`).join(""));
+}
+
 function putSizes(el, rows, list, landLabel) {
-  const steps = el.querySelectorAll(".step");
+  const steps = el.querySelectorAll(".step:not(.land)");
   steps.forEach((row, i) => {
     const s = row.querySelector("[data-size]"); if (s) s.innerHTML = rows ? sizeText(rows[i]) : "";
     if (rows && rows[i]) row.dataset.w = rows[i].width;
   });
-  el.querySelectorAll(".land").forEach(x => x.remove());
+  el.querySelectorAll(".land:not(.auto)").forEach(x => x.remove());
   if (rows && rows.length > list.length) {
     const r = rows[rows.length - 1];
     el.insertAdjacentHTML("beforeend", `<div class="step land"><span class="n"></span><div class="ctl">${esc(r.note)}</div><span class="size">${sizeText({...r, note: ""})}</span><span></span></div>`);
@@ -399,6 +406,7 @@ async function doPreview() {
   document.querySelectorAll("#cycles .cycle").forEach((d, k) => {
     const name = Object.keys(state.cycles)[k];
     putSizes($(".steps", d), sz && sz.cycles[name], state.cycles[name]);
+    putAuto($(".steps", d), sz && sz.cycle_auto && sz.cycle_auto[name]);
     const st = sz && sz.cycle_starts && sz.cycle_starts[name];
     $("[data-start]", d).textContent = st ? `· starts at ${st[0]}×${st[1]}` : "";
   });

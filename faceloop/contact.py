@@ -60,6 +60,9 @@ class ContactRecorder:
         self.folder = Path(folder)
         self.recipe = recipe
         self.dir = self.folder / ".contact"
+        self.cycles = recipe.cycles  # the cycles as run (may start with the lead-in)
+        self.auto: set = set()
+        self.n_lead = 0
 
     def __call__(self, cycle: str, step_i: int, names: list[str], imgs: np.ndarray):
         d = self.dir / cycle
@@ -68,8 +71,11 @@ class ContactRecorder:
             Image.fromarray(img).save(d / f"{name}__{step_i + 1:02d}.png", compress_level=1)
 
     def labels(self, cycle: str) -> list[str]:
-        steps = self.recipe.cycles[cycle]
-        return ["cycle start"] + [step_label(s) for s in steps]
+        steps = self.cycles[cycle]
+        labels = [step_label(s) for s in steps]
+        if cycle in self.auto:
+            labels = ["(lead-in) " + lab for lab in labels[:self.n_lead]] + labels[self.n_lead:]
+        return ["cycle start"] + labels
 
     def build(self) -> list[Path]:
         out = []

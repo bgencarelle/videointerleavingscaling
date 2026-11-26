@@ -92,7 +92,8 @@ def test_page_and_preview(server):
     assert not bad["ok"] and "C" in bad["errors"][0]
     grows = call("/api/preview", {"recipe": {**RECIPE, "cycles": {"A": [{"op": "xbr", "scale": 2}]}, "pattern": ["A"]},
                                   "source": str(src)})
-    assert not grows["ok"] and any("size" in e for e in grows["errors"])
+    assert grows["ok"] and len(grows["sizes"]["cycle_auto"]["A"]) == 1  # the lead-in, added automatically
+    assert "automatically" in grows["sizes"]["cycle_auto"]["A"][0]["note"]
 
 
 def test_presets(server):

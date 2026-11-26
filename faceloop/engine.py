@@ -289,11 +289,12 @@ def step_size(st: dict, cur: Size, src: Size, loop: Size | None, scale_of) -> tu
 MAX_GROWTH = 16  # a pattern may not make frames bigger than 16x the source's pixels
 
 
-def simulate_pattern(recipe: Recipe, src: Size, models=None, rounds: int = 3) -> dict:
+def simulate_pattern(recipe: Recipe, src: Size, models=None, rounds: int = 3, cycles: dict | None = None) -> dict:
     """Follow the frame size through the lead-in and a few rounds of the
     pattern. Returns the loop size, where each cycle starts once things have
     settled, the biggest size seen, and whether the sizes settle at all."""
     scale_of = _scale_lookup(models)
+    cycles = cycles if cycles is not None else recipe.cycles
     known = True
     cur = src
     biggest = src.width * src.height
@@ -308,7 +309,7 @@ def simulate_pattern(recipe: Recipe, src: Size, models=None, rounds: int = 3) ->
         for k in recipe.pattern:
             if r == rounds - 1 and k not in starts:
                 starts[k] = cur
-            for st in recipe.cycles[k]:
+            for st in cycles[k]:
                 cur, raw, ok = step_size(st, cur, src, loop, scale_of)
                 known &= ok
                 cyc_big = max(cyc_big, cur.width * cur.height, raw[0] * raw[1] if raw else 0)
@@ -320,14 +321,28 @@ def simulate_pattern(recipe: Recipe, src: Size, models=None, rounds: int = 3) ->
             "stable": stable, "known": known, "too_big": too_big}
 
 
-def check_pattern(recipe: Recipe, src: Size, models=None) -> None:
-    sim = simulate_pattern(recipe, src, models)
+def effective_cycles(recipe: Recipe, src: Size, models=None) -> tuple[dict, set]:
+    """The cycles as they will run. If the sizes wouldn't settle on their own
+    (which only happens when no cycle has a fixed-size step), the first cycle
+    of the pattern starts with the lead-in steps, added automatically; that
+    one fixed point is enough. Otherwise nothing is added. Returns (cycles,
+    names of the cycles that got the lead-in)."""
+    if simulate_pattern(recipe, src, models)["stable"]:
+        return dict(recipe.cycles), set()
+    auto = {recipe.pattern[0]}
+    cyc = {k: (list(recipe.lead_in) + list(v) if k in auto else v) for k, v in recipe.cycles.items()}
+    return cyc, auto
+
+
+def check_pattern(recipe: Recipe, src: Size, models=None) -> tuple[dict, set]:
+    cycles, auto = effective_cycles(recipe, src, models)
+    sim = simulate_pattern(recipe, src, models, cycles=cycles)
     if not sim["stable"]:
-        raise RecipeError("the frames keep changing size from one round of cycles to the next "
-                          "(e.g. a x2 step with nothing that resizes back): give a cycle a step "
-                          "that resizes to a fixed size, like the loop size")
+        raise RecipeError("the frames keep changing size from one round of cycles to the next; "
+                          "give a cycle a step with a fixed size, like the loop size")
     if sim["too_big"]:
         raise RecipeError(f"frames would get bigger than {MAX_GROWTH}x the source's pixels inside the loop")
+    return cycles, auto
 
 
 def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: int) -> tuple[Size, int]:
@@ -377,15 +392,23 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
             cur = land
         return rows, cur
 
-    sim = simulate_pattern(recipe, src, models)
+    eff, auto = effective_cycles(recipe, src, models)
+    sim = simulate_pattern(recipe, src, models, cycles=eff)
     loop = sim["loop"]
     lead, _ = run(recipe.lead_in, src, None, None, "")
-    cycles = {k: run(recipe.cycles[k], sim["starts"].get(k, loop), loop, None, "")[0]
-              for k in dict.fromkeys(recipe.pattern) if k in recipe.cycles}
+    cycles, cycle_auto = {}, {}
+    for k in dict.fromkeys(recipe.pattern):
+        if k not in recipe.cycles:
+            continue
+        rows, _ = run(eff[k], sim["starts"].get(k, loop), loop, None, "")
+        n_auto = len(recipe.lead_in) if k in auto else 0
+        for r in rows[:n_auto]:
+            r["note"] = "lead-in, added automatically so the sizes don't keep growing"
+        cycle_auto[k], cycles[k] = rows[:n_auto], rows[n_auto:]
     fin, _ = run(recipe.finish, sim["end"], loop, src, "area lands on the source size")
-    return {"loop": loop, "lead_in": lead, "cycles": cycles, "finish": fin,
+    return {"loop": loop, "lead_in": lead, "cycles": cycles, "cycle_auto": cycle_auto, "finish": fin,
             "cycle_starts": {k: [v.width, v.height] for k, v in sim["starts"].items()},
-            "stable": sim["stable"], "too_big": sim["too_big"]}
+            "auto": sorted(auto), "stable": sim["stable"], "too_big": sim["too_big"]}
 
 
 MAX_BATCH = 256
@@ -399,11 +422,12 @@ def batch_sizes(src: Size, recipe: Recipe, ram: int | None = None, models=None) 
     full size, so they run a few frames (a chunk) at a time."""
     ram = ram or total_ram_bytes()
     _, lead_big = _sim(recipe.lead_in, src, src, None, src.width * src.height)
-    sim = simulate_pattern(recipe, src, models)
+    cycles, _ = effective_cycles(recipe, src, models)
+    sim = simulate_pattern(recipe, src, models, cycles=cycles)
     loop = sim["loop"]
     cyc_big = max(sim["cycle_biggest"] if sim["known"] else 0, loop.width * loop.height)
     for k in set(recipe.pattern):  # unknown model scales: assume up to x4
-        _, cyc_big = _sim(recipe.cycles[k], sim["starts"].get(k, loop), src, loop, cyc_big)
+        _, cyc_big = _sim(cycles[k], sim["starts"].get(k, loop), src, loop, cyc_big)
     _, fin_big = _sim(recipe.finish, sim["end"], src, loop, src.width * src.height)
     f32 = 3 * 4 * 4  # float32 RGB, a few temporaries
     chunk = int(max(1, min(64, ram * 0.15 // (max(lead_big, fin_big) * f32))))
@@ -524,7 +548,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     if skipped:
         _log(f"resuming: {skipped} frames already done")
 
-    check_pattern(recipe, src, models)
+    cycles, auto = check_pattern(recipe, src, models)
     bs, chunk = batch_sizes(src, recipe, models=models)
     bs = batch_size or bs
     chunk = min(chunk, bs)
@@ -555,6 +579,11 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     pending = []
     stopped = False
     _log(f"batches of {bs} frames (full-size work in chunks of {chunk})")
+    if auto:
+        _log(f"cycle{'s' if len(auto) > 1 else ''} {', '.join(sorted(auto))} start with the lead-in "
+             "(added automatically: without it the frame sizes would keep growing)")
+    if recorder is not None:
+        recorder.cycles, recorder.auto, recorder.n_lead = cycles, auto, len(recipe.lead_in)
 
     def prefetch(start):
         return [loader.submit(load_frame, p) for p in todo[start:start + bs]]
@@ -586,7 +615,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 with lock:
                     if capture:
                         capture(-1, x)
-                    x = run_cycle(x, recipe.cycles[cname], ctx, capture)
+                    x = run_cycle(x, cycles[cname], ctx, capture)
                 progress.frame_cycles += len(batch)
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
