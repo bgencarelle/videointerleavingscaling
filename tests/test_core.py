@@ -294,3 +294,24 @@ def test_finish_is_required_and_part_of_the_code():
          "cycles": {"A": [{"op": "resize", "method": "area", "width": 16}]}, "iterations": 1, "save_every": 1}
     with pytest.raises(RecipeError):
         Recipe.from_dict(d)
+
+
+def test_chained_pass_on_saved_output(tmp_path):
+    src, _ = _make_source(tmp_path)
+    out = tmp_path / "out"
+    r = _recipe(iterations=2, save_every=2)
+    first = run_pass(r, src, out, device=torch.device("cpu"), batch_size=8)
+    second = run_pass(r, first.folder / "c0002", out, device=torch.device("cpu"), batch_size=8)
+    label = second.folder.parent.name
+    assert label == f"faces_src+{r.code()}c0002"
+    info = json.loads((second.folder / "recipe.json").read_text())
+    assert info["source"]["root"] == "faces_src"
+    assert info["source"]["chained_from"].endswith("c0002")
+    assert len(list((second.folder / "c0002").glob("*.webp"))) == 8
+    # same contact frames as the original source
+    a = sorted(p.name.split("__")[0] for p in (first.folder / ".contact" / "A").glob("*__00.png"))
+    b = sorted(p.name.split("__")[0].rsplit(".", 1)[0] for p in (second.folder / ".contact" / "A").glob("*__00.png"))
+    assert [x.rsplit(".", 1)[0] for x in a] == b
+    # and a third link in the chain
+    third = run_pass(r, second.folder / "c0002", out, device=torch.device("cpu"), batch_size=8)
+    assert third.folder.parent.name == f"faces_src+{r.code()}c0002+{r.code()}c0002"

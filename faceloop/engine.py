@@ -14,6 +14,7 @@ import datetime as _dt
 import json
 import os
 import random
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -314,6 +315,25 @@ def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int
     return int(max(1, min(64, budget // per_frame)))
 
 
+def source_identity(source: Path) -> dict:
+    """Name a source for output folders. A saved loop of an earlier pass
+    (a cXXXX folder next to a recipe.json) is named after its origin, e.g.
+    'BG_faceSource+8ba5c0200', and keeps the original source as its root."""
+    source = Path(source)
+    parent_rec = source.parent / "recipe.json"
+    if re.fullmatch(r"c\d{4}", source.name) and parent_rec.exists():
+        try:
+            info = json.loads(parent_rec.read_text(encoding="utf-8"))
+            psrc = info.get("source", {})
+            plabel = psrc.get("label") or source.parent.parent.name
+            root = psrc.get("root") or plabel
+            return {"label": f"{plabel}+{info.get('code', '')}{source.name}", "root": root,
+                    "chained_from": str(source)}
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"label": source.name, "root": source.name}
+
+
 def contact_indices(n_frames: int, source_name: str, k: int = 6) -> list[int]:
     """The same random frames for every pass of one source."""
     rnd = random.Random(f"faceloop:{source_name}")
@@ -348,7 +368,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     curves, warn = curves_from_icc(icc)
     transfer = Transfer(curves)
 
-    folder = out_root / source.name / recipe.folder_name(gan)
+    ident = source_identity(source)
+    folder = out_root / ident["label"] / recipe.folder_name(gan)
     recorder = None
     if write and contact and on_contact is None:
         from .contact import ContactRecorder
@@ -377,10 +398,10 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
             "webp": webp_desc, "tone_curve": transfer.describe(),
             "models": models.describe_used(recipe) if models is not None else {},
         }
-        d["source"] = {"folder": str(source), "frames": len(frames), "size": str(src)}
+        d["source"] = {"folder": str(source), "frames": len(frames), "size": str(src), **ident}
         (folder / "recipe.json").write_text(json.dumps(d, indent=2), encoding="utf-8")
 
-    _log(f"pass {folder.name} on {source.name}: {len(frames)} frames at {src}, device {device}")
+    _log(f"pass {folder.name} on {ident['label']}: {len(frames)} frames at {src}, device {device}")
     if warn:
         _log(f"warning: {warn}")
     if recipe.output.get("format") == "webp" and recipe.output.get("sharp_yuv", True) and webp_desc.startswith("Pillow"):
@@ -403,7 +424,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
 
     bs = batch_size or default_batch_size(src, recipe)
     save_pts = set(recipe.save_points())
-    contact_idx = set(contact_indices(len(frames), source.name))
+    contact_idx = set(contact_indices(len(frames), ident["root"]))
     contact_names = {frames[i].name for i in contact_idx}
     last_of_cycle = {k: max(i for i in range(1, recipe.iterations + 1) if recipe.cycle_at(i) == k)
                      for k in set(recipe.pattern) if any(recipe.cycle_at(i) == k for i in range(1, recipe.iterations + 1))}
@@ -488,7 +509,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
 
     secs = time.time() - t0
     if write and not stopped:
-        _update_catalog(out_root, source, folder, recipe, gan, src, len(frames))
+        _update_catalog(out_root, ident["label"], folder, recipe, gan, src, len(frames))
         _log(f"pass complete in {_fmt_eta(secs)}: {progress.frame_cycles:,} frame-cycles, {progress.images_saved:,} images saved")
     return PassResult(folder=folder, frames=len(frames), seconds=secs, skipped_frames=skipped, stopped=stopped)
 
@@ -497,21 +518,21 @@ CATALOG_FIELDS = ["code", "source", "folder", "slug", "name", "pattern", "cycles
                   "save_every", "rounding", "light", "gan", "size", "frames", "date"]
 
 
-def _update_catalog(out_root: Path, source: Path, folder: Path, recipe: Recipe,
+def _update_catalog(out_root: Path, source_label: str, folder: Path, recipe: Recipe,
                     gan: set[str], src: Size, n: int) -> None:
     path = out_root / "catalog.csv"
     rows = []
     if path.exists():
         with open(path, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f)
-                    if not (r.get("code") == recipe.code() and r.get("source") == source.name)]
+                    if not (r.get("code") == recipe.code() and r.get("source") == source_label)]
     fin = ", ".join(_describe_step(s) for s in recipe.finish) or "area"
     cyc = ("lead-in: " + ", ".join(_describe_step(s) for s in recipe.lead_in) + " | "
            + " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
                         for k in dict.fromkeys(recipe.pattern))
            + f" | finish: {fin}")
     rows.append({
-        "code": recipe.code(), "source": source.name, "folder": str(folder.relative_to(out_root)),
+        "code": recipe.code(), "source": source_label, "folder": str(folder.relative_to(out_root)),
         "slug": recipe.slug(gan), "name": recipe.name, "pattern": ",".join(recipe.pattern),
         "cycles": cyc, "iterations": recipe.iterations, "save_every": recipe.save_every,
         "rounding": recipe.rounding, "light": recipe.light,

@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .engine import Controls, Progress, StopRequested, pick_device, plan_sizes, run_pass
+from .engine import Controls, Progress, StopRequested, pick_device, plan_sizes, run_pass, source_identity
 from .imageio import list_frames, probe
 from .models import ModelManager
 from .recipe import Recipe, RecipeError
@@ -238,8 +238,10 @@ class App:
             if not frames:
                 raise ValueError("no PNG, JPEG or WebP frames in this folder")
             w, h, icc = probe(frames[0])
+            ident = source_identity(p)
             self._probe_cache[key] = {"path": str(p), "frames": len(frames), "width": w, "height": h,
-                                      "profile": bool(icc), "first": frames[0].name, "last": frames[-1].name}
+                                      "profile": bool(icc), "first": frames[0].name, "last": frames[-1].name,
+                                      "label": ident["label"], "chained": "chained_from" in ident}
         return self._probe_cache[key]
 
     # ---------------------------------------------------------- api
@@ -379,6 +381,8 @@ class App:
                 "complete": rel in done, "date": done.get(rel, {}).get("date", ""),
                 "gan": done.get(rel, {}).get("gan", ""), "description": done.get(rel, {}).get("cycles", ""),
                 "iterations": info.get("iterations"), "saves": saves,
+                "save_dirs": [str(folder / f"c{n:04d}") for n in saves],
+                "chained_from": info.get("source", {}).get("chained_from"),
                 "contact": [str(p) for p in sorted(folder.glob("contact_*.png"))],
                 "sample": sample, "recipe": {k: info.get(k) for k in
                                              ("name", "lead_in", "cycles", "pattern", "iterations",

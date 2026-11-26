@@ -30,8 +30,17 @@ passes are still there next time.
   - Stop ends after the current step; Continue picks up where it stopped
     (finished frames are skipped).
 - **Results:** every pass in an output folder, filterable. Each card shows a
-  contact sheet per cycle and the last saved frame. "Load into Build" copies
-  a pass's recipe back to the Build tab, ready to tweak.
+  contact sheet per cycle and the last saved frame.
+  - "Load into Build" copies a pass's recipe back to the Build tab, ready to
+    tweak.
+  - The saved-loop buttons (c25 ▸, c200 ▸, ...) make that loop the source of
+    a new pass, so passes chain.
+  - A chained pass is filed under where it came from, e.g.
+    `BG_faceSource+8ba5c0200/...`, and its contact sheets use the same
+    frames as the original source.
+  - Each link in a chain adds one more WebP q95 save. Measured on 810x1080
+    frames, that's about 53-57 dB per save for soft loop-like frames,
+    invisible next to what one loop cycle does.
 
 **Contact sheets:** each pass has a `contact_A.png` (B, ...) for the last run
 of each cycle. Rows are the same randomly chosen frames for every pass of a

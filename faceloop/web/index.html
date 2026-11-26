@@ -358,7 +358,7 @@ async function doPreview() {
   catch (e) { preview = {ok: false, errors: [e.message]}; }
   const p = preview;
   $("#errors").innerHTML = (p.errors || []).map(esc).join("<br>");
-  $("#fname").textContent = p.folder ? `${src ? src.split("/").pop() : "<source>"}/${p.folder}` : "–";
+  $("#fname").textContent = p.folder ? `${p.source ? p.source.label : (src ? src.split("/").pop() : "<source>")}/${p.folder}` : "–";
   $("#ganBadge").innerHTML = p.gan ? `<span class="badge gan">GAN</span>` : (p.folder ? `<span class="badge ok">no GAN</span>` : "");
   $("#savesView").textContent = p.saves ? `saves at ${p.saves.length > 6 ? p.saves.slice(0, 5).join(", ") + " … " + p.saves.at(-1) : p.saves.join(", ")} (${p.saves.length})` : "";
   const sz = p.sizes;
@@ -429,7 +429,8 @@ async function loadSource() {
   if (!p) { $("#srcInfo").textContent = ""; changed(); return; }
   try {
     const i = await api("/api/source", {path: p});
-    $("#srcInfo").textContent = `${i.frames} frames · ${i.width}×${i.height} · ${i.profile ? "colour profile embedded" : "no colour profile (treated as sRGB)"} · ${i.first} … ${i.last}`;
+    $("#srcInfo").textContent = `${i.frames} frames · ${i.width}×${i.height} · ${i.profile ? "colour profile embedded" : "no colour profile (treated as sRGB)"} · ${i.first} … ${i.last}`
+      + (i.chained ? ` · output of an earlier pass: results filed under ${i.label}` : "");
     $("#srcInfo").className = "muted";
   } catch (e) { $("#srcInfo").textContent = e.message; $("#srcInfo").className = "err"; }
   changed();
@@ -529,11 +530,14 @@ function renderResults() {
         <span style="flex:1"></span><button class="small" data-use="${RESULTS.indexOf(p)}">Load into Build</button></div>
       <div class="slug">${esc(p.source)}/${esc(p.slug)}_${esc(p.code)}</div>
       <div class="desc">${esc(p.description)}</div>
-      <div class="desc">saved loops: ${p.saves.map(s => "c" + s).join(", ") || "none yet"}</div>
+      ${p.chained_from ? `<div class="desc">ran on the output of: ${esc(p.chained_from)}</div>` : ""}
+      <div class="desc">saved loops (click to run a new pass on them):
+        ${p.save_dirs.map((d, k) => `<button class="small" data-src="${esc(d)}" title="use ${esc(d)} as the source">c${p.saves[k]} ▸</button>`).join(" ") || "none yet"}</div>
       ${p.contact.map(c => `<a href="${fileUrl(c)}" target="_blank"><img loading="lazy" src="${fileUrl(c)}" title="${esc(c.split("/").pop())}"></a>`).join("")}
       ${p.sample ? `<div class="desc" style="margin-top:6px">last saved frame:</div><a href="${fileUrl(p.sample)}" target="_blank"><img class="sample" loading="lazy" src="${fileUrl(p.sample)}"></a>` : ""}
     </div>`).join("") || `<div class="muted">No passes here yet.</div>`;
   document.querySelectorAll("[data-use]").forEach(b => b.onclick = () => { loadRecipe(RESULTS[+b.dataset.use].recipe); showTab("build"); });
+  document.querySelectorAll("[data-src]").forEach(b => b.onclick = () => { $("#src").value = b.dataset.src; showTab("build"); loadSource(); });
 }
 
 // ------------------------------------------------------------------ tabs + start

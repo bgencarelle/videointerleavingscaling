@@ -163,7 +163,25 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
    finished frames.
 4. **Results:** every pass under an output folder (complete or not), with
    contact sheets, the last saved frame, a filter, a card size, and "Load
-   into Build".
+   into Build". Each saved loop has a button that makes it the source of a
+   new pass (chaining).
+
+## Chaining passes
+
+- A saved loop (`.../<pass>/c0200`) can be the source of another pass.
+- Its output is filed under `<parent label>+<parent code><cXXXX>`, e.g.
+  `BG_faceSource+8ba5c0200`, which chains further
+  (`...+8ba5c0200+1f2ac0050`).
+- `recipe.json` records `source.label`, `source.root` (the original source
+  folder name) and `source.chained_from`.
+- Contact frames are seeded by the root, so every pass in a chain shows the
+  same frames.
+- **Generational loss** of one extra WebP q95 + sharp_yuv save, measured at
+  810x1080:
+  - soft, loop-like frames: 52.8-56.6 dB after 1 save, 45.8-56.2 dB after 10
+  - sharp test card (worst case): 48.9 dB after 1 save, 40.4 dB after 10
+
+  Chaining from the saved WebPs is accepted as part of the look.
 
 ## Install and delivery
 
