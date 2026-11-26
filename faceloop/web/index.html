@@ -37,9 +37,11 @@
   .muted { color: var(--dim); font-size: 12px; }
   .err { color: var(--bad); font-size: 12px; }
   .steps { display: flex; flex-direction: column; gap: 6px; }
-  .step { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  .step { display: grid; grid-template-columns: 20px minmax(0, 1fr) minmax(0, max-content) auto; gap: 8px; align-items: center; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  .step .ctl { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
   .step .n { color: var(--dim); width: 18px; font-size: 12px; text-align: right; }
-  .step .size { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--accent); white-space: nowrap; }
+  .step .size { font-family: var(--mono); font-size: 12px; color: var(--accent); text-align: right; max-width: 300px; }
+  .step .btns { display: flex; gap: 4px; flex: none; }
   .step .size .e { color: var(--dim); }
   .step.land { background: none; border-style: dashed; color: var(--dim); font-size: 12px; }
   .step select.model { max-width: 330px; }
@@ -230,14 +232,6 @@ function defaultStep(op) {
   return {op: "resize", method: "bicubic", width: "loop"};
 }
 
-function parseWidth(v) {
-  v = String(v).trim().toLowerCase();
-  if (v === "") return null;
-  if (v === "source" || v === "loop") return v;
-  const n = parseInt(v, 10);
-  return isNaN(n) ? v : n;
-}
-
 // ------------------------------------------------------------------ step editor
 function modelOptions(sel) {
   const fam = {}; MODELS.forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
@@ -256,25 +250,31 @@ function modelOptions(sel) {
 function stepHTML(s, i, n) {
   const opSel = `<select data-k="op">${["resize", "model", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
   let f = "";
-  const w = `<input data-k="width" style="width:78px" value="${esc(s.width ?? "")}" placeholder="${s.op === "resize" ? "width" : "native"}" title="pixels, 'loop' or 'source'">`;
+  const mode = s.width == null ? "keep" : (s.width === "loop" || s.width === "source" ? s.width : "px");
+  const keepLabel = s.op === "xbr" ? "keep the xBR size" : "keep the model's size";
+  const wOpts = (s.op === "resize" ? [] : [["keep", keepLabel]]).concat(
+    s.op === "resize" ? [["loop", "the loop size"], ["source", "the source size"], ["px", "a width of"]]
+                      : [["loop", "resize to the loop size"], ["source", "resize to the source size"], ["px", "resize to a width of"]]);
+  const w = `<select data-k="wmode">${wOpts.map(([v, t]) => `<option value="${v}" ${mode === v ? "selected" : ""}>${t}</option>`).join("")}</select>`
+    + (mode === "px" ? ` <input data-k="wpx" type="number" min="1" style="width:76px" value="${esc(s.width)}"> px` : "");
   if (s.op === "resize") {
     f = `<select data-k="method">${KERNELS.map(k => `<option ${s.method === k ? "selected" : ""}>${k}</option>`).join("")}</select> to ${w}`;
     if (!["nearest", "area"].includes(s.method)) f += `
       <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
       <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
   } else if (s.op === "model") {
-    f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then to ${w}`;
+    f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then ${w}`;
   } else if (s.op === "xbr") {
-    f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">x${k}</option>`).join("")}</select> then to ${w}`;
+    f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select> then ${w}`;
   } else if (s.op === "chroma") {
     f = `<select data-k="mode">${CHROMA.map(([v, t]) => `<option ${s.mode === v ? "selected" : ""} value="${v}">${t}</option>`).join("")}</select>
       <select data-k="matrix"><option value="601" ${(s.matrix || "601") === "601" ? "selected" : ""}>BT.601</option><option value="709" ${s.matrix === "709" ? "selected" : ""}>BT.709</option></select>`;
   }
-  return `<div class="step" data-i="${i}"><span class="n">${i + 1}</span>${opSel}${f}
+  return `<div class="step" data-i="${i}"><span class="n">${i + 1}</span><div class="ctl">${opSel}${f}</div>
     <span class="size" data-size></span>
-    <button class="small" data-mv="-1" ${i === 0 ? "disabled" : ""}>↑</button>
+    <span class="btns"><button class="small" data-mv="-1" ${i === 0 ? "disabled" : ""}>↑</button>
     <button class="small" data-mv="1" ${i === n - 1 ? "disabled" : ""}>↓</button>
-    <button class="small" data-del>✕</button></div>`;
+    <button class="small" data-del>✕</button></span></div>`;
 }
 
 function renderSteps(el, list) {
@@ -284,7 +284,15 @@ function renderSteps(el, list) {
     row.querySelectorAll("[data-k]").forEach(inp => inp.addEventListener("change", () => {
       const k = inp.dataset.k, s = list[i];
       if (k === "op") { list[i] = defaultStep(inp.value); render(); return; }
-      if (k === "width") s.width = parseWidth(inp.value);
+      if (k === "wmode") {
+        const v = inp.value;
+        if (v === "keep") s.width = null;
+        else if (v === "px") s.width = (typeof s.width === "number" ? s.width : (+row.dataset.w || 160));
+        else s.width = v;
+        if (s.width === null && s.op !== "resize") delete s.width;
+        render(); return;
+      }
+      if (k === "wpx") { const n = parseInt(inp.value, 10); s.width = n > 0 ? n : s.width; }
       else if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
       else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
       else if (k === "scale") s.scale = +inp.value;
@@ -348,17 +356,31 @@ function changed() {
 function sizeText(r) {
   if (!r) return "";
   const e = r.error > 0.001 ? ` <span class="e">(height off by ${r.error.toFixed(2)} px)</span>` : "";
+  const dim = (w, h) => `${w}×${h}`;
+  const change = (from, w) => {
+    if (!from || from[0] === w) return "";
+    const f = from[0] / w;
+    return f > 1 ? ` <span class="e">(shrinks ${+f.toFixed(2)}×)</span>` : ` <span class="e">(stretches ${+(1 / f).toFixed(2)}×)</span>`;
+  };
+  if (r.raw) {
+    const same = r.raw[0] === r.width && r.raw[1] === r.height;
+    return `×${r.scale} → ${dim(r.raw[0], r.raw[1])}` + (same ? ` <span class="e">(no extra resize)</span>`
+      : `, then area ${r.raw[0] > r.width ? "↓" : "↑"} ${dim(r.width, r.height)}${change(r.raw, r.width)}`) + e;
+  }
   const note = r.note ? ` <span class="e">${esc(r.note)}</span>` : "";
-  return `→ ${r.width}×${r.height}${e}${note}`;
+  return `→ ${dim(r.width, r.height)}${change(r.from, r.width)}${e}${note}`;
 }
 
 function putSizes(el, rows, list, landLabel) {
   const steps = el.querySelectorAll(".step");
-  steps.forEach((row, i) => { const s = row.querySelector("[data-size]"); if (s) s.innerHTML = rows ? sizeText(rows[i]) : ""; });
+  steps.forEach((row, i) => {
+    const s = row.querySelector("[data-size]"); if (s) s.innerHTML = rows ? sizeText(rows[i]) : "";
+    if (rows && rows[i]) row.dataset.w = rows[i].width;
+  });
   el.querySelectorAll(".land").forEach(x => x.remove());
   if (rows && rows.length > list.length) {
     const r = rows[rows.length - 1];
-    el.insertAdjacentHTML("beforeend", `<div class="step land"><span class="n"></span>${esc(r.note)}<span class="size">${sizeText({...r, note: ""})}</span></div>`);
+    el.insertAdjacentHTML("beforeend", `<div class="step land"><span class="n"></span><div class="ctl">${esc(r.note)}</div><span class="size">${sizeText({...r, note: ""})}</span><span></span></div>`);
   }
 }
 

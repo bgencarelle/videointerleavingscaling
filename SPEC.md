@@ -177,7 +177,13 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 - Folder pickers use the macOS "choose folder" dialog via osascript.
 - Images are served only from output folders the app knows about.
 1. **Build:** folders; lead-in, cycles and finish as step lists (add,
-   reorder, remove); pattern; cycles total; save every; rounding; light;
+   reorder, remove). Sizes are chosen from a menu, not typed as words:
+   - plain resize: "to the loop size / the source size / a width of [px]"
+   - xBR and AI models: "then keep its size / resize to the loop size /
+     the source size / a width of [px]"
+
+   Each step's readout spells out the result, e.g. "×4 → 324×432, then
+   area ↓ 162×216 (shrinks 2×)" or "(no extra resize)". pattern; cycles total; save every; rounding; light;
    output format. **Recent:** finished passes from `catalog.csv` in every
    output folder used, newest first. Loading one fills Build with that
    pass's exact recipe and leaves the source folder as it is. Live preview

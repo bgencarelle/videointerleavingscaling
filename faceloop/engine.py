@@ -299,13 +299,15 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
         rows = []
         for st in steps:
             note = ""
+            raw = None
+            before = cur
             w = st.get("width")
             tgt = src if w == "source" else (loop if w == "loop" else (size_for(int(w), src) if isinstance(w, int) else None))
             op = st.get("op")
             if op in ("model", "xbr"):
                 k = scale_of(st)
                 if k:
-                    note = f"x{k} gives {cur.width * k}x{cur.height * k}"
+                    raw = [cur.width * k, cur.height * k]
                     cur = tgt or Size(cur.width * k, cur.height * k)
                 else:
                     note = "scale unknown until loaded"
@@ -314,10 +316,12 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
                 pass
             elif tgt is not None:
                 cur = tgt
-            rows.append({"width": cur.width, "height": cur.height,
+            rows.append({"width": cur.width, "height": cur.height, "from": [before.width, before.height],
+                         "raw": raw, "scale": scale_of(st) if op in ("model", "xbr") else None,
                          "error": round(aspect_error(cur, src), 3), "note": note})
         if land is not None and cur != land:
-            rows.append({"width": land.width, "height": land.height, "error": round(aspect_error(land, src), 3),
+            rows.append({"width": land.width, "height": land.height, "from": [cur.width, cur.height],
+                         "raw": None, "scale": None, "error": round(aspect_error(land, src), 3),
                          "note": land_label})
             cur = land
         return rows, cur
