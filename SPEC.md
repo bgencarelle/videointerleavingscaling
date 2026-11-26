@@ -36,8 +36,8 @@ contact sheets, GUI.
        area. That threw away the last step's detail and repeated the resize
        the next cycle does anyway.)
   3. **finish:** at each save point (every `save_every` cycles and after the
-     last), a *copy* is taken from wherever the cycles left it back to the
-     source size and saved. The loop carries on, untouched.
+     last), a *copy* is taken from wherever the cycles left it through the
+     finish steps and saved. The loop carries on, untouched.
 - **Steps:** each step is a target width plus a method. The height follows
   the source aspect, rounded to the nearest whole pixel. Width is pixels,
   `"source"`, or `"loop"` (`"loop"` isn't allowed in the lead-in, which
@@ -46,9 +46,11 @@ contact sheets, GUI.
 - **Model steps:** run the model at its fixed factor (x1, x2, x3 or x4), then
   an area resize to the step's width. Without a width the model's own output
   size is kept.
-- **Finish:** you choose it, like any other steps (in the GUI). Area lands
-  it exactly on the source size if its steps don't end there; an empty
-  finish is just that area resize. There is no automatic finish. Example:
+- **Finish:** you choose it, like any other steps (in the GUI). "Ends at"
+  (`land_on_source`): the source size (default; area lands it exactly if
+  its steps don't end there, an empty finish is just that area resize) or
+  wherever the last step ends (saved at that size; an empty finish saves the
+  loop frames as they are; the slug gets `free`). Example:
   loop 162x216 → bicubic → 810x1080. (Earlier versions had an automatic AI
   finish, SwinIR then RealESRNet. They cost 0.9 s and 0.37 s per frame per
   save on the M6, more than the looping itself.)
@@ -204,10 +206,14 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 - Folder pickers use the macOS "choose folder" dialog via osascript.
 - Images are served only from output folders the app knows about.
 1. **Build:** folders; lead-in, cycles and finish as step lists (add,
-   reorder, remove). Sizes are chosen from a menu, not typed as words:
-   - plain resize: "to the loop size / the source size / a width of [px]"
-   - xBR and AI models: "then keep its size / resize to the loop size /
-     the source size / a width of [px]"
+   reorder, remove). Sizes are chosen from a menu, never typed:
+   - plain resize: the loop size, the source size, a width that divides the
+     incoming width exactly (÷2, ÷3 …, marked "height rounded" when only the
+     width divides), or ×2/×3/×4 of it
+   - xBR and AI models: keep its size, the loop or source size, or an exact
+     division of the step's own output width
+   Widths are stored as pixels; one that no longer divides (an earlier
+   step changed) is shown as "N px wide (not an exact ÷ or ×)".
 
    Each step's readout spells out the result, e.g. "×4 → 324×432, then
    area ↓ 162×216 (shrinks 2×)" or "(no extra resize)". pattern; cycles total; save every; rounding; light;

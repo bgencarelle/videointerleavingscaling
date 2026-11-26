@@ -138,9 +138,13 @@
    </section>
 
    <section>
-    <h2>Finish <small class="muted">a copy, from wherever the cycles left it, back to full size at each save; area lands it exactly</small></h2>
+    <h2>Finish <small class="muted">runs on a copy at each save, from wherever the cycles left it; the copy is what's saved</small></h2>
     <div class="steps" id="finish"></div>
     <div class="row"><button class="small" data-add="finish">+ step</button></div>
+    <div class="row"><label class="f">Ends at</label>
+      <select id="land"><option value="1">the source size (area lands it there if the steps don't)</option>
+        <option value="0">wherever the last step ends</option></select>
+      <span class="muted" id="savedSize"></span></div>
     <div class="row"><label class="f">Saved as</label>
       <select id="format"><option value="webp">WebP q95 + sharp_yuv</option><option value="png">PNG (lossless)</option></select></div>
    </section>
@@ -224,6 +228,7 @@ let state = {
   cycles: {A: [{op: "resize", method: "nearest", width: 54}, {op: "resize", method: "bicubic", width: "loop"}]},
   pattern: ["A"], iterations: 200, save_every: 25,
   finish: [{op: "resize", method: "bicubic", width: "source"}],
+  land_on_source: true,
   rounding: "srgb", light: "linear", precision: "fp32", output: {format: "webp", quality: 95, sharp_yuv: true},
 };
 let preview = null;
@@ -231,7 +236,7 @@ let preview = null;
 function recipe() {
   return {name: state.name, lead_in: state.lead_in, cycles: state.cycles, pattern: state.pattern,
           iterations: state.iterations, save_every: state.save_every, finish: state.finish,
-          rounding: state.rounding, light: state.light, precision: state.precision, output: state.output};
+          land_on_source: state.land_on_source, rounding: state.rounding, light: state.light, precision: state.precision, output: state.output};
 }
 
 function defaultStep(op) {
@@ -243,6 +248,33 @@ function defaultStep(op) {
 }
 
 // ------------------------------------------------------------------ step editor
+// Widths are picked from a menu: exact divisions of the width coming in (for a
+// model / xBR / IRN step, of its own output), whole multiples for plain
+// resizes, and the loop and source sizes. The menu is filled from the size
+// preview, so it needs a source folder.
+const CHOICES = new WeakMap();   // step -> width choices from the last preview
+function widthOptions(s, choices) {
+  const opt = (v, t, sel) => `<option value="${v}" ${sel ? "selected" : ""}>${esc(t)}</option>`;
+  const then = s.op === "resize" ? "" : "then ";
+  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size" : "keep the model's size");
+  let h = s.op === "resize" ? "" : opt("keep", keepLabel, s.width == null);
+  h += opt("loop", then + "the loop size", s.width === "loop") + opt("source", then + "the source size", s.width === "source");
+  const nums = (choices || []);
+  if (nums.length) {
+    const grp = (op, title) => {
+      const list = nums.filter(c => c.op === op);
+      if (!list.length) return "";
+      return `<optgroup label="${title}">` + list.map(c => opt("w:" + c.width,
+        `${then}${op === "/" ? "÷" : "×"}${c.k} → ${c.width}×${c.height}${c.exact ? "" : " (height rounded)"}`,
+        s.width === c.width)).join("") + "</optgroup>";
+    };
+    h += grp("/", "divide the width exactly") + grp("x", "multiply the width");
+  }
+  if (typeof s.width === "number" && !nums.some(c => c.width === s.width))
+    h += opt("w:" + s.width, `${then}${s.width} px wide` + (choices ? " (not an exact ÷ or ×)" : ""), true);
+  return h;
+}
+
 function modelOptions(sel) {
   const fam = {}; MODELS.filter(m => m.family !== "irn").forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
   let h = "";
@@ -260,13 +292,7 @@ function modelOptions(sel) {
 function stepHTML(s, i, n) {
   const opSel = `<select data-k="op">${["resize", "model", "irn", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
   let f = "";
-  const mode = s.width == null ? "keep" : (s.width === "loop" || s.width === "source" ? s.width : "px");
-  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size" : "keep the model's size");
-  const wOpts = (s.op === "resize" ? [] : [["keep", keepLabel]]).concat(
-    s.op === "resize" ? [["loop", "the loop size"], ["source", "the source size"], ["px", "a width of"]]
-                      : [["loop", "resize to the loop size"], ["source", "resize to the source size"], ["px", "resize to a width of"]]);
-  const w = `<select data-k="wmode">${wOpts.map(([v, t]) => `<option value="${v}" ${mode === v ? "selected" : ""}>${t}</option>`).join("")}</select>`
-    + (mode === "px" ? ` <input data-k="wpx" type="number" min="1" style="width:76px" value="${esc(s.width)}"> px` : "");
+  const w = `<select data-k="wmode">${widthOptions(s, CHOICES.get(s))}</select>`;
   if (s.op === "resize") {
     f = `<select data-k="method">${KERNELS.map(k => `<option ${s.method === k ? "selected" : ""}>${k}</option>`).join("")}</select> to ${w}`;
     if (s.method === "dpid") f += `
@@ -311,13 +337,12 @@ function renderSteps(el, list) {
       if (k === "wmode") {
         const v = inp.value;
         if (v === "keep") s.width = null;
-        else if (v === "px") s.width = (typeof s.width === "number" ? s.width : (+row.dataset.w || 160));
+        else if (v.startsWith("w:")) s.width = +v.slice(2);
         else s.width = v;
         if (s.width === null && s.op !== "resize") delete s.width;
-        render(); return;
+        changed(); return;
       }
-      if (k === "wpx") { const n = parseInt(inp.value, 10); s.width = n > 0 ? n : s.width; }
-      else if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
+      if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
       else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
       else if (k === "scale") { s.scale = +inp.value; if (s.op === "irn") { changed(); render(); return; } }
       else if (k === "direction") { s.direction = inp.value; render(); return; }
@@ -375,6 +400,7 @@ function render() {
   $("#light").value = state.light;
   $("#precision").value = state.precision;
   $("#format").value = state.output.format;
+  $("#land").value = state.land_on_source === false ? "0" : "1";
   changed();
 }
 
@@ -415,7 +441,10 @@ function putSizes(el, rows, list, landLabel) {
   const steps = el.querySelectorAll(".step:not(.land)");
   steps.forEach((row, i) => {
     const s = row.querySelector("[data-size]"); if (s) s.innerHTML = rows ? sizeText(rows[i]) : "";
-    if (rows && rows[i]) row.dataset.w = rows[i].width;
+    const st = list[i], sel = row.querySelector('[data-k="wmode"]');
+    if (!st) return;
+    if (rows && rows[i]) { if (rows[i].choices) CHOICES.set(st, rows[i].choices); else CHOICES.delete(st); }
+    if (sel) sel.innerHTML = widthOptions(st, CHOICES.get(st));
   });
   el.querySelectorAll(".land:not(.auto)").forEach(x => x.remove());
   if (rows && rows.length > list.length) {
@@ -444,6 +473,8 @@ async function doPreview() {
     $("[data-start]", d).textContent = st ? `· starts at ${st[0]}×${st[1]}` : "";
   });
   putSizes($("#finish"), sz && sz.finish, state.finish);
+  $("#savedSize").textContent = sz && sz.saved ? `· saved at ${sz.saved[0]}×${sz.saved[1]}`
+    + (sz.src && (sz.saved[0] !== sz.src[0] || sz.saved[1] !== sz.src[1]) ? ` (source is ${sz.src[0]}×${sz.src[1]})` : "") : "";
   $("#estimate").disabled = !(p.ok && src && $("#out").value.trim());
 }
 
@@ -459,6 +490,7 @@ function bind() {
   $("#rounding").onchange = e => { state.rounding = e.target.value; changed(); };
   $("#light").onchange = e => { state.light = e.target.value; changed(); };
   $("#precision").onchange = e => { state.precision = e.target.value; changed(); };
+  $("#land").onchange = e => { state.land_on_source = e.target.value === "1"; changed(); };
   $("#format").onchange = e => { state.output = e.target.value === "png" ? {format: "png"} : {format: "webp", quality: 95, sharp_yuv: true}; changed(); };
   document.querySelectorAll("[data-add]").forEach(b => b.onclick = () => {
     (b.dataset.add === "lead" ? state.lead_in : state.finish).push(defaultStep("resize")); render();
@@ -503,7 +535,7 @@ function bind() {
 function loadRecipe(r) {
   state = {name: r.name || "", lead_in: r.lead_in, cycles: r.cycles, pattern: r.pattern,
            iterations: r.iterations, save_every: r.save_every, finish: r.finish || [],
-           rounding: r.rounding || "srgb", light: r.light || "linear", precision: r.precision || "fp32",
+           land_on_source: r.land_on_source !== false, rounding: r.rounding || "srgb", light: r.light || "linear", precision: r.precision || "fp32",
            output: r.output || {format: "webp", quality: 95, sharp_yuv: true}};
   render();
 }

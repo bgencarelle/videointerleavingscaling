@@ -234,8 +234,9 @@ def finish_chunked(x: torch.Tensor, recipe: Recipe, ctx: StepContext, chunk: int
 
 
 def run_finish(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
-    """Take a copy of the loop frames back to the source size."""
-    return run_steps(x, recipe.finish, ctx, ctx.src)
+    """The finish steps on a copy of the loop frames; then, if the recipe
+    lands on the source, an area resize to the source size when needed."""
+    return run_steps(x, recipe.finish, ctx, ctx.src if recipe.land_on_source else None)
 
 
 # ------------------------------------------------------------- output
@@ -478,10 +479,41 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
         for r in rows[:n_auto]:
             r["note"] = "lead-in, added automatically so the sizes don't keep growing"
         cycle_auto[k], cycles[k] = rows[:n_auto], rows[n_auto:]
-    fin, _ = run(recipe.finish, sim["end"], loop, src, "area lands on the source size")
+    fin, saved = run(recipe.finish, sim["end"], loop, src if recipe.land_on_source else None,
+                     "area lands on the source size")
+    for rows in [lead, fin, *cycles.values()]:
+        for r in rows:
+            if r["note"] != "area lands on the source size":
+                r["choices"] = width_choices(r, src)
     return {"loop": loop, "lead_in": lead, "cycles": cycles, "cycle_auto": cycle_auto, "finish": fin,
+            "saved": [saved.width, saved.height],
             "cycle_starts": {k: [v.width, v.height] for k, v in sim["starts"].items()},
             "auto": sorted(auto), "stable": sim["stable"], "too_big": sim["too_big"]}
+
+
+def width_choices(row: dict, src: Size, max_mult: int = 4) -> list[dict]:
+    """Widths the GUI offers for a step: the ones that divide the width coming
+    into the resize exactly (for a model, xBR or IRN step, its own output),
+    and for a plain resize also whole multiples of it. Each is
+    {"width", "height", "k", "op" ("/" or "x"), "exact"}; exact means the
+    height divides (or multiplies) exactly too, not just the width."""
+    from .sizes import aspect_error
+    base_w, base_h = row["raw"] if row.get("raw") else row["from"]
+    out = []
+    for k in range(base_w // 2, 1, -1):  # biggest result first
+        if base_w % k:
+            continue
+        s = size_for(base_w // k, src)
+        out.append({"width": s.width, "height": s.height, "k": k, "op": "/",
+                    "exact": base_h % k == 0 and s.height == base_h // k,
+                    "error": round(aspect_error(s, src), 3)})
+    out.reverse()  # ÷2 first
+    if not row.get("raw"):
+        for k in range(2, max_mult + 1):
+            s = size_for(base_w * k, src)
+            out.append({"width": s.width, "height": s.height, "k": k, "op": "x",
+                        "exact": s.height == base_h * k, "error": round(aspect_error(s, src), 3)})
+    return out
 
 
 MAX_BATCH = 256
@@ -650,6 +682,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     pool = ThreadPoolExecutor(max_workers=max(2, (os.cpu_count() or 4) // 2))
     loader = ThreadPoolExecutor(max_workers=4)  # reads the next batch while the GPU works
     pending = []
+    saved_size = None
     stopped = False
     _log(f"batches of {bs} frames (full-size work in chunks of {chunk})")
     if auto:
@@ -691,6 +724,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
                     u8 = finish_chunked(x, recipe, ctx, chunk, lock)
+                    saved_size = Size(u8.shape[2], u8.shape[1])
                     for p, img in zip(batch, u8):
                         progress.images_saved += 1
                         pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
@@ -729,24 +763,25 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
 
     secs = time.time() - t0
     if write and not stopped:
-        _update_catalog(out_root, ident["label"], folder, recipe, gan, src, len(frames))
+        _update_catalog(out_root, ident["label"], folder, recipe, gan, src, len(frames), saved_size)
         _log(f"pass complete in {_fmt_eta(secs)}: {progress.frame_cycles:,} frame-cycles, {progress.images_saved:,} images saved")
     return PassResult(folder=folder, frames=len(frames), seconds=secs, skipped_frames=skipped, stopped=stopped)
 
 
 CATALOG_FIELDS = ["code", "source", "folder", "slug", "name", "pattern", "cycles", "iterations",
-                  "save_every", "rounding", "light", "gan", "size", "frames", "date"]
+                  "save_every", "rounding", "light", "gan", "size", "saved_size", "frames", "date"]
 
 
 def _update_catalog(out_root: Path, source_label: str, folder: Path, recipe: Recipe,
-                    gan: set[str], src: Size, n: int) -> None:
+                    gan: set[str], src: Size, n: int, saved: Size | None = None) -> None:
     path = out_root / "catalog.csv"
     rows = []
     if path.exists():
         with open(path, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f)
                     if not (r.get("code") == recipe.code() and r.get("source") == source_label)]
-    fin = ", ".join(_describe_step(s) for s in recipe.finish) or "area"
+    fin = ", ".join(_describe_step(s) for s in recipe.finish)
+    fin = (fin or "area") if recipe.land_on_source else (fin + ", no landing" if fin else "none")
     cyc = ("lead-in: " + ", ".join(_describe_step(s) for s in recipe.lead_in) + " | "
            + " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
                         for k in dict.fromkeys(recipe.pattern))
@@ -756,7 +791,8 @@ def _update_catalog(out_root: Path, source_label: str, folder: Path, recipe: Rec
         "slug": recipe.slug(gan), "name": recipe.name, "pattern": ",".join(recipe.pattern),
         "cycles": cyc, "iterations": recipe.iterations, "save_every": recipe.save_every,
         "rounding": recipe.rounding, "light": recipe.light,
-        "gan": "yes" if recipe.uses_gan(gan) else "no", "size": str(src), "frames": n,
+        "gan": "yes" if recipe.uses_gan(gan) else "no", "size": str(src), "saved_size": str(saved or src),
+        "frames": n,
         "date": _dt.datetime.now().isoformat(timespec="seconds"),
     })
     tmp = path.with_suffix(".csv.tmp")

@@ -320,7 +320,8 @@ class App:
                 p = plan_sizes(r, Size(info["width"], info["height"]), self.models)
                 out["sizes"] = {"loop": [p["loop"].width, p["loop"].height], "lead_in": p["lead_in"],
                                 "cycles": p["cycles"], "finish": p["finish"], "cycle_starts": p["cycle_starts"],
-                                "cycle_auto": p["cycle_auto"]}
+                                "cycle_auto": p["cycle_auto"], "saved": p["saved"],
+                                "src": [info["width"], info["height"]]}
                 try:
                     from .engine import check_pattern
                     check_pattern(r, Size(info["width"], info["height"]), self.models)
@@ -475,7 +476,7 @@ class App:
             raise ValueError("not a pass in a known output folder")
         info = json.loads((folder / "recipe.json").read_text(encoding="utf-8"))
         keep = ("name", "lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
-                "rounding", "light", "precision", "output")
+                "land_on_source", "rounding", "light", "precision", "output")
         return {k: info[k] for k in keep if k in info}
 
     def api_results(self, q):
@@ -515,7 +516,8 @@ class App:
                 "contact": [str(p) for p in sorted(folder.glob("contact_*.png"))],
                 "sample": sample, "recipe": {k: info.get(k) for k in
                                              ("name", "lead_in", "cycles", "pattern", "iterations",
-                                              "save_every", "finish", "rounding", "light", "output")},
+                                              "save_every", "finish", "land_on_source", "rounding",
+                                              "light", "precision", "output")},
                 "mtime": rec.stat().st_mtime,
             })
         rows.sort(key=lambda r: r["mtime"], reverse=True)

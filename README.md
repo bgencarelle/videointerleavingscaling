@@ -19,7 +19,7 @@ passes are still there next time.
   - lead-in steps (once, down to the loop size)
   - one or more cycles of steps (each step is a method plus a size)
   - the pattern (e.g. `A, B`), the number of cycles, and how often to save
-  - the finish (a copy back to full size at each save)
+  - the finish (a copy at each save, landed on the source size or left where it ends)
 
   Every step shows the size it produces, and the folder name updates as you
   go. Save and load your own presets. **Recent** lists finished passes
@@ -96,7 +96,9 @@ A recipe is a JSON file with three parts:
 - **cycles:** alternate in `pattern` order, starting at the loop size. Each
   cycle continues from wherever the previous one ended. `iterations` counts
   single cycles.
-- **finish:** at every save point, a copy is taken back to full size.
+- **finish:** at every save point, a copy goes through the finish steps and
+  is saved, back at the source size or (if you choose) at whatever size the
+  finish ends.
 
 ```json
 {
@@ -146,8 +148,10 @@ A recipe is a JSON file with three parts:
 - There's no automatic resize between cycles. If no cycle has a step with a
   fixed size, so the frames would keep growing, the first cycle
   automatically starts with the lead-in; Build shows it as a dashed row.
-- `finish`: a list of steps back to full size (e.g. one bicubic resize).
-  Area lands them exactly on the source size; `[]` means just area.
+- `finish`: a list of steps run on a copy at each save (e.g. one bicubic
+  resize). Area lands them exactly on the source size; `[]` means just area.
+- `land_on_source`: `true` (default) or `false`: save at whatever size the
+  finish ends (`[]` then saves the loop frames as they are).
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
 - `precision`: `"fp32"` (default) or `"fp16"`: AI models in half precision,
   often much faster on the GPU, with slightly different pixels.

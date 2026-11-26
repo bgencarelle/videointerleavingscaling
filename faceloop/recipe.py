@@ -9,12 +9,14 @@ cycles    A, B, C ... alternate in `pattern` order. The first cycle starts
           the next one takes it from there (no automatic resize in between).
           The sizes must settle into a repeating pattern (checked before a
           run). `iterations` counts single cycles.
-finish    takes a *copy* of the frames back to the source size at every save
-          point (every `save_every` cycles and after the last). The loop
-          itself carries on from the small frames, untouched.
-          You choose the finish steps like any others (in the GUI). If they
-          don't end exactly at the source size, an area resize lands them.
-          An empty finish means just that area resize.
+finish    runs on a *copy* of the frames at every save point (every
+          `save_every` cycles and after the last); that copy is what gets
+          saved. The loop itself carries on from its frames, untouched.
+          You choose the finish steps like any others (in the GUI).
+          land_on_source (default true): if the finish doesn't end exactly
+          at the source size, an area resize lands it there (an empty finish
+          means just that resize). With it off, frames are saved at whatever
+          size the finish ends at (an empty finish saves the loop frames).
 
 Step kinds
 ----------
@@ -37,7 +39,9 @@ Step kinds
     colour back with nearest; size unchanged, so no width
 
 `width` is pixels, or "source" (source width), or "loop" (the loop size;
-not allowed in the lead-in, which defines it).
+not allowed in the lead-in, which defines it). The GUI offers only widths
+that divide the step's incoming width exactly (or whole multiples of it,
+for plain resizes), plus the loop and source sizes; the engine takes any.
 """
 from __future__ import annotations
 
@@ -73,19 +77,20 @@ class Recipe:
     output: dict[str, Any] = field(default_factory=lambda: {
         "format": "webp", "quality": 95, "sharp_yuv": True})
     name: str = ""                  # optional label, shown in the slug
+    land_on_source: bool = True     # finish ends with an area resize to the source size
 
     # ------------------------------------------------------------------ io
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {"lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
-                 "rounding", "light", "precision", "output", "name"}
+                 "rounding", "light", "precision", "output", "name", "land_on_source"}
         extra = set(d) - known - {"version", "code", "slug", "engine", "source"}
         if extra:
             raise RecipeError(f"unknown recipe keys: {sorted(extra)}")
         if "lead_in" not in d:
             raise RecipeError("recipe needs a lead_in (steps from the source down to the loop size)")
         if "finish" not in d:
-            raise RecipeError("recipe needs a finish (steps back to the source size; [] = just area)")
+            raise RecipeError("recipe needs a finish (steps run on a copy at each save; [] = none)")
         r = cls(
             lead_in=[dict(s) for s in d["lead_in"]],
             cycles={k: [dict(s) for s in v] for k, v in d["cycles"].items()},
@@ -98,6 +103,7 @@ class Recipe:
             precision=d.get("precision", "fp32"),
             output=dict(d.get("output") or {"format": "webp", "quality": 95, "sharp_yuv": True}),
             name=d.get("name", ""),
+            land_on_source=bool(d.get("land_on_source", True)),
         )
         r.validate()
         return r
@@ -117,6 +123,7 @@ class Recipe:
             "iterations": self.iterations,
             "save_every": self.save_every,
             "finish": copy.deepcopy(self.finish),
+            "land_on_source": self.land_on_source,
             "rounding": self.rounding,
             "light": self.light,
             "precision": self.precision,
@@ -227,6 +234,8 @@ class Recipe:
             "rounding": self.rounding,
             "light": self.light,
             "output": self.output,
+            # absent when on (the default) so old codes stay
+            **({} if self.land_on_source else {"land_on_source": False}),
             # only matters when a model is used; absent for fp32 so old codes stay
             **({"precision": self.precision} if self.precision != "fp32" and self.model_ids() else {}),
         }
@@ -241,7 +250,11 @@ class Recipe:
     def slug(self, gan_models: set[str] | None = None, max_len: int = 80) -> str:
         lead = "-".join(_step_slug(s) for s in self.lead_in)
         cyc = "+".join("-".join(_step_slug(s) for s in self.cycles[k]) for k in _unique(self.pattern))
-        fin = "-".join(_step_slug(s) for s in self.finish) or "area"
+        fin = "-".join(_step_slug(s) for s in self.finish)
+        if self.land_on_source:
+            fin = fin or "area"
+        else:
+            fin = (fin + "-free") if fin else "free"
         flags = []
         if gan_models and self.uses_gan(gan_models):
             flags.append("GAN")

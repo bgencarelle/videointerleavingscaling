@@ -256,6 +256,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         "frames": total_frames, "iterations": recipe.iterations, "loop": str(ctx.loop),
         "est_seconds": (per * recipe.iterations + per_finish * saves + per_lead) * total_frames,
         "est_bytes": avg * total_frames * saves, "saves": saves, "size": str(src), "steps": steps,
+        "saved_size": f"{fin[0].shape[1]}x{fin[0].shape[0]}" if len(fin) else str(src),
         "precision": recipe.precision,
     }
 
