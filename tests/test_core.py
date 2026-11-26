@@ -262,11 +262,11 @@ def test_linear_light_differs_from_encoded(tmp_path):
 def test_auto_finish_chain():
     def plan(cur, threshold=2.0):
         return [(s.get("model", s.get("method")), s["width"]) for s in auto_finish_steps(cur, 810, threshold)]
-    assert plan(162) == [("swinir-classical-x4", 648), ("area", "source")]
-    assert plan(40) == [("swinir-classical-x4", 160), ("swinir-classical-x4", 640), ("area", "source")]
-    assert plan(300) == [("swinir-classical-x2", 600), ("area", "source")]
-    assert plan(450) == [("area", "source")]                      # under 2x left: no AI
-    assert plan(450, 1.5) == [("swinir-classical-x2", 900), ("area", "source")]
+    assert plan(162) == [("realesrnet-x4", 648), ("area", "source")]
+    assert plan(40) == [("realesrnet-x4", 160), ("realesrnet-x4", 640), ("area", "source")]
+    assert plan(300) == [("realesrnet-x4", 1200), ("area", "source")]   # overshoot, area down
+    assert plan(450) == [("area", "source")]                          # under 2x left: no AI
+    assert plan(450, 1.5) == [("realesrnet-x4", 1800), ("area", "source")]
     assert plan(810) == [("area", "source")]
 
 
@@ -299,5 +299,5 @@ def test_finish_changes_code_but_not_loop():
     a = _recipe()
     b = _recipe(finish="auto")
     assert a.code() != b.code()
-    assert b.slug().endswith("_swin")
-    assert "swinir-classical-x4" in b.model_ids()
+    assert b.slug().endswith("_esrnet")
+    assert "realesrnet-x4" in b.model_ids()

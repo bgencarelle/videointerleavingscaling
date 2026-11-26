@@ -77,9 +77,9 @@ A recipe is a JSON file with three parts:
   for 810x1080 frames, multiples of 3 keep it exact.
 - A model step runs the model, then area-resizes to `width`.
 - A cycle that doesn't end at the loop size is landed there with area.
-- `finish`: `"auto"` uses SwinIR classical (x4 while 4x or more is left, x2
-  while `finish_threshold`, default 2, or more is left), then area for the
-  rest. Or give a list of steps. It always lands exactly on the source size.
+- `finish`: `"auto"` uses RealESRNet x4 while `finish_threshold` (default 2)
+  or more is left, then area for the rest. Or give a list of steps. It
+  always lands exactly on the source size.
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
 - `light`: `"linear"` (default) or `"encoded"`.
 - `output`: default `{"format": "webp", "quality": 95, "sharp_yuv": true}`;
@@ -111,7 +111,7 @@ run code.
 runs/
   catalog.csv
   <source folder>/
-    demo_area162_near54-w2xcunetn1@108-avv3@L+..._swin_GAN_xxxx/
+    demo_area162_near54-w2xcunetn1@108-avv3@L+..._esrnet_GAN_xxxx/
       c0025/ c0050/ ...     frames, named like the sources, .webp
       recipe.json           every setting + versions + model checksums
       log.txt

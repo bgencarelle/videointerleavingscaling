@@ -418,7 +418,7 @@ def _update_catalog(out_root: Path, source: Path, folder: Path, recipe: Recipe,
         with open(path, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f)
                     if not (r.get("code") == recipe.code() and r.get("source") == source.name)]
-    fin = "auto (SwinIR)" if recipe.finish == "auto" else ", ".join(_describe_step(s) for s in recipe.finish)
+    fin = "auto (RealESRNet)" if recipe.finish == "auto" else ", ".join(_describe_step(s) for s in recipe.finish)
     cyc = ("lead-in: " + ", ".join(_describe_step(s) for s in recipe.lead_in) + " | "
            + " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
                         for k in dict.fromkeys(recipe.pattern))

@@ -32,12 +32,14 @@ loop / finish pass shape. The GUI is stage 5.
 - **Model steps:** run the model at its fixed factor (x1, x2, x3 or x4), then
   an area resize to the step's width. Without a width the model's own output
   size is kept.
-- **Finish:** `"auto"` (default) is the transparent, upscaling-only
-  **SwinIR classical**: x4 while 4x or more is still needed, then x2 while
-  `finish_threshold` (default 2x) or more is still needed. Once less is left,
-  plain **area** covers the rest (not AI). Or write your own finish steps (AI
-  or not). Either way an area resize lands exactly on the source size.
-  Example: loop 162 wide → SwinIR x4 → 648 → area → 810.
+- **Finish:** `"auto"` (default) is **RealESRNet x4**: accuracy-trained,
+  upscaling-only, and a plain conv net, so it's fast on the GPU. It runs x4
+  while `finish_threshold` (default 2x) or more is still needed; overshooting
+  is fine. Once less is left, plain **area** covers the rest (not AI). Or
+  write your own finish steps (AI or not). Either way an area resize lands
+  exactly on the source size. Example: loop 162 wide → RealESRNet x4 → 648
+  → area → 810. (The first version of the finish used SwinIR classical; it
+  cost about 0.9 s per frame per save on the M6, more than the looping.)
 - Replaces the first design, where every cycle returned to the source size.
 - **Queue:** passes are built by hand and run one after another. No grid.
 
@@ -76,7 +78,9 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 - One deliberate difference: the cunet denoise-only (x1) models are padded to
   a multiple of 4 instead of 2, because with 2 the original program loses
   the last row or column for some frame sizes.
-- **Alignment:** waifu2x and SwinIR were measured at about 0 shift. The GAN
+- **Alignment:** the finish runs on a copy, never inside the loop, so any
+  small offset it has can't build up across cycles.
+- waifu2x and SwinIR were measured at about 0 shift. The GAN
   models change content too much to measure to a fraction of a pixel, but
   30-cycle loops showed no visible drift.
 
@@ -120,7 +124,7 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   reuses the folder.
 - The `slug` is readable: `<lead-in>_<cycles>_<finish>`. Steps are written
   like `area162`, `near54`, `w2xcunetn1@108`, `avv3@L` (L = loop size,
-  S = source); cycles are joined with `+`; the finish is `swin` for auto.
+  S = source); cycles are joined with `+`; the finish is `esrnet` for auto.
   Then come the flags `GAN`
   (any GAN-labelled model), `rlin` (linear rounding), `enc` (no linear light).
   Long slugs are shortened with `~` but always keep the flags.

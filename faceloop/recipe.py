@@ -10,9 +10,9 @@ cycles    A, B, C ... alternate in `pattern` order. Every cycle starts and
 finish    takes a *copy* of the frames back to the source size at every save
           point (every `save_every` cycles and after the last). The loop
           itself carries on from the small frames, untouched.
-          "auto" (default): SwinIR classical x4 while 4x or more is still
-          needed, then x2 while `finish_threshold` (default 2x) or more is
-          still needed, then area for the rest. Or a list of your own steps.
+          "auto" (default): RealESRNet x4 while `finish_threshold` (default
+          2x) or more is still needed (overshooting is fine), then area for
+          the rest. Or a list of your own steps.
           Either way an area resize lands exactly on the source size.
 
 Step kinds
@@ -36,12 +36,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bump when pixel output for the same recipe would change.
-ENGINE_PIXELS_VERSION = 2
+ENGINE_PIXELS_VERSION = 3
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
                 "bicubic": "bic", "lanczos": "lanc"}
 
-AUTO_FINISH_MODELS = {4: "swinir-classical-x4", 2: "swinir-classical-x2"}
+AUTO_FINISH_MODEL = "realesrnet-x4"  # accuracy-trained, upscaling only, x4
 
 
 class RecipeError(ValueError):
@@ -128,7 +128,7 @@ class Recipe:
     def model_ids(self) -> set[str]:
         ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
         if self.finish == "auto":
-            ids |= set(AUTO_FINISH_MODELS.values())
+            ids.add(AUTO_FINISH_MODEL)
         return ids
 
     def validate(self, known_models: set[str] | None = None) -> None:
@@ -178,10 +178,8 @@ class Recipe:
                     raise RecipeError(f"{where}: unknown model {m!r}")
             else:
                 raise RecipeError(f"{where}: unknown op {op!r}")
-        if known_models is not None and self.finish == "auto":
-            for m in AUTO_FINISH_MODELS.values():
-                if m not in known_models:
-                    raise RecipeError(f"auto finish needs model {m}")
+        if known_models is not None and self.finish == "auto" and AUTO_FINISH_MODEL not in known_models:
+            raise RecipeError(f"auto finish needs model {AUTO_FINISH_MODEL}")
 
     # ------------------------------------------------------- identity
     def pixel_identity(self) -> dict:
@@ -210,7 +208,7 @@ class Recipe:
         lead = "-".join(_step_slug(s) for s in self.lead_in)
         cyc = "+".join("-".join(_step_slug(s) for s in self.cycles[k]) for k in _unique(self.pattern))
         if self.finish == "auto":
-            fin = "swin" if self.finish_threshold == 2.0 else f"swin{self.finish_threshold:g}"
+            fin = "esrnet" if self.finish_threshold == 2.0 else f"esrnet{self.finish_threshold:g}"
         else:
             fin = "-".join(_step_slug(s) for s in self.finish) or "area"
         flags = []
@@ -243,15 +241,12 @@ class Recipe:
 
 
 def auto_finish_steps(cur_width: int, src_width: int, threshold: float = 2.0) -> list[dict]:
-    """SwinIR x4 while >= 4x is left, x2 while >= threshold is left, area lands."""
+    """RealESRNet x4 while `threshold` or more is left, then area lands."""
     steps = []
     w = cur_width
-    while src_width / w >= 4:
+    while src_width / w >= threshold:
         w *= 4
-        steps.append({"op": "model", "model": AUTO_FINISH_MODELS[4], "width": w})
-    while src_width / w >= threshold:  # threshold < 2: x2 overshoots, area brings it down
-        w *= 2
-        steps.append({"op": "model", "model": AUTO_FINISH_MODELS[2], "width": w})
+        steps.append({"op": "model", "model": AUTO_FINISH_MODEL, "width": w})
     steps.append({"op": "resize", "method": "area", "width": "source"})
     return steps
 
