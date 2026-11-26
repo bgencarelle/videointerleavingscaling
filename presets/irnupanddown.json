@@ -1,0 +1,46 @@
+{
+  "name": "",
+  "lead_in": [
+    {
+      "op": "resize",
+      "method": "bicubic",
+      "width": "source"
+    }
+  ],
+  "cycles": {
+    "A": [
+      {
+        "op": "irn",
+        "direction": "down",
+        "scale": 2,
+        "width": null
+      },
+      {
+        "op": "irn",
+        "direction": "up",
+        "scale": 2,
+        "width": null
+      }
+    ]
+  },
+  "pattern": [
+    "A"
+  ],
+  "iterations": 200,
+  "save_every": 25,
+  "finish": [
+    {
+      "op": "resize",
+      "method": "bicubic",
+      "width": "source"
+    }
+  ],
+  "rounding": "srgb",
+  "light": "linear",
+  "precision": "fp32",
+  "output": {
+    "format": "webp",
+    "quality": 95,
+    "sharp_yuv": true
+  }
+}
