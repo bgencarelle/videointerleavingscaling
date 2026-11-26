@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import threading
+import warnings
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -196,25 +197,22 @@ class ModelManager:
 
     def describe_used(self, recipe) -> dict:
         out = {}
-        for k in set(recipe.pattern):
-            for s in recipe.cycles[k]:
-                if s.get("op") != "model":
-                    continue
-                info = self.catalog.get(s["model"])
-                if not info:
-                    continue
-                files = {}
-                for f in info.files:
-                    p = self.weights_dir / f["path"]
-                    if f.get("sha256"):
-                        files[f["path"]] = f["sha256"]
-                    elif p.exists():
-                        key = str(p)
-                        if key not in self._sha_cache:
-                            self._sha_cache[key] = sha256_file(p)
-                        files[f["path"]] = self._sha_cache[key]
-                out[info.id] = {"label": info.label, "family": info.family, "scale": info.scale,
-                                "description": info.description, "files": files}
+        for mid in sorted(recipe.model_ids()):
+            info = self.catalog.get(mid)
+            if not info:
+                continue
+            files = {}
+            for f in info.files:
+                p = self.weights_dir / f["path"]
+                if f.get("sha256"):
+                    files[f["path"]] = f["sha256"]
+                elif p.exists():
+                    key = str(p)
+                    if key not in self._sha_cache:
+                        self._sha_cache[key] = sha256_file(p)
+                    files[f["path"]] = self._sha_cache[key]
+            out[info.id] = {"label": info.label, "family": info.family, "scale": info.scale,
+                            "description": info.description, "files": files}
         return out
 
     # ---------------------------------------------------------- download
@@ -279,6 +277,8 @@ class ModelManager:
             return ModelRunner(info, m.to(device).eval(), a["scale"], device)
         # spandrel (built-in or drop-in)
         import spandrel
+        # SwinIR's code inside spandrel triggers a harmless torch.meshgrid warning
+        warnings.filterwarnings("ignore", message=r"torch\.meshgrid: in an upcoming release")
         path = self.weights_dir / info.files[0]["path"]
         desc = spandrel.ModelLoader().load_from_file(str(path))
         if not isinstance(desc, spandrel.ImageModelDescriptor):

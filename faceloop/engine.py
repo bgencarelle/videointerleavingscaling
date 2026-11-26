@@ -1,7 +1,8 @@
 """Runs a pass over one source folder.
 
-Frames are processed in batches. Each batch goes through every cycle of the
-pass in memory; saved loops are written as the batch reaches them. When a
+Frames are processed in batches. Each batch runs the lead-in once (down to
+the loop size), then every cycle in memory at the loop size. At each save
+point a copy is finished back to the source size and written. When a
 batch is done, a marker records it, so a stopped or crashed run resumes at
 the first unfinished batch (and re-runs only that batch).
 """
@@ -26,7 +27,7 @@ from . import __version__
 from .colour import Transfer, curves_from_icc, quantize
 from .imageio import list_frames, load_frame, probe, save_frame, webp_backend
 from .kernels import KernelResizer
-from .recipe import Recipe, RecipeError
+from .recipe import Recipe, RecipeError, auto_finish_steps
 from .sizes import Size, size_for
 
 
@@ -57,14 +58,19 @@ class StepContext:
     rounding: str
     resizer: KernelResizer
     models: object | None  # faceloop.models.ModelManager
+    loop: Size | None = None  # size after the lead-in
 
 
-def _target(step: dict, src: Size, cur: Size) -> Size | None:
+def _target(step: dict, src: Size, cur: Size, loop: Size | None = None) -> Size | None:
     w = step.get("width")
     if w is None:
         return None
     if w == "source":
         return src
+    if w == "loop":
+        if loop is None:
+            raise RecipeError("'loop' width used before the loop size is known")
+        return loop
     return size_for(int(w), src)
 
 
@@ -82,13 +88,13 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     op = step["op"]
     if op == "resize":
         kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
-        x = _kernel(x, _target(step, ctx.src, cur), step["method"], ctx, **kw)
+        x = _kernel(x, _target(step, ctx.src, cur, ctx.loop), step["method"], ctx, **kw)
     elif op == "model":
         if ctx.models is None:
             raise RecipeError("model step used but no models are available")
         model = ctx.models.get(step["model"], x.device)
         x = model(x).clamp(0, 1)
-        t = _target(step, ctx.src, cur)
+        t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
     else:
@@ -96,17 +102,45 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     return quantize(x, ctx.rounding, ctx.transfer)
 
 
-def run_cycle(x: torch.Tensor, steps: list[dict], ctx: StepContext,
+def run_steps(x: torch.Tensor, steps: list[dict], ctx: StepContext, land: Size | None,
               capture: Callable[[int, torch.Tensor], None] | None = None) -> torch.Tensor:
+    """Run steps; then area-land on `land` if the last step didn't end there."""
     for i, step in enumerate(steps):
         x = apply_step(x, step, ctx)
         if capture:
             capture(i, x)
-    if (x.shape[-1], x.shape[-2]) != (ctx.src.width, ctx.src.height):
-        x = quantize(_kernel(x, ctx.src, "area", ctx), ctx.rounding, ctx.transfer)
+    if land is not None and (x.shape[-1], x.shape[-2]) != (land.width, land.height):
+        x = quantize(_kernel(x, land, "area", ctx), ctx.rounding, ctx.transfer)
         if capture:
             capture(len(steps), x)
     return x
+
+
+def run_cycle(x: torch.Tensor, steps: list[dict], ctx: StepContext,
+              capture: Callable[[int, torch.Tensor], None] | None = None) -> torch.Tensor:
+    """A cycle starts and ends at the loop size (the source size if unset)."""
+    return run_steps(x, steps, ctx, ctx.loop or ctx.src, capture)
+
+
+def run_lead_in(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
+    x = run_steps(x, recipe.lead_in, ctx, None)
+    loop = Size(x.shape[-1], x.shape[-2])
+    if ctx.loop is not None and ctx.loop != loop:
+        raise RecipeError(f"lead-in gave {loop}, expected {ctx.loop}")
+    ctx.loop = loop
+    return x
+
+
+def finish_steps(recipe: Recipe, loop: Size, src: Size) -> list[dict]:
+    if recipe.finish == "auto":
+        return auto_finish_steps(loop.width, src.width, recipe.finish_threshold)
+    return recipe.finish
+
+
+def run_finish(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
+    """Take a copy of the loop frames back to the source size."""
+    cur = Size(x.shape[-1], x.shape[-2])
+    return run_steps(x, finish_steps(recipe, cur, ctx.src), ctx, ctx.src)
 
 
 # ------------------------------------------------------------- output
@@ -187,22 +221,33 @@ class PassResult:
     stopped: bool = False
 
 
+def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: int) -> tuple[Size, int]:
+    for s in steps:
+        w = s.get("width")
+        if w == "source":
+            tgt = src
+        elif w == "loop":
+            tgt = loop
+        elif isinstance(w, int):
+            tgt = size_for(w, src)
+        else:
+            tgt = None
+        if s.get("op") == "model":
+            biggest = max(biggest, cur.width * cur.height * 16)  # up to x4 before landing
+            cur = tgt or Size(cur.width * 4, cur.height * 4)
+        elif tgt is not None:
+            cur = tgt
+        biggest = max(biggest, cur.width * cur.height)
+    return cur, biggest
+
+
 def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int:
     """Frames per batch, from the largest image any step produces."""
     ram = ram or total_ram_bytes()
-    biggest = src.width * src.height
+    loop, biggest = _sim(recipe.lead_in, src, src, None, src.width * src.height)
     for k in set(recipe.pattern):
-        cur = src
-        for s in recipe.cycles[k]:
-            w = s.get("width")
-            tgt = src if w == "source" else (size_for(int(w), src) if isinstance(w, int) else None)
-            if s.get("op") == "model":
-                # assume up to x4 before the step lands on its width
-                biggest = max(biggest, cur.width * cur.height * 16)
-                cur = tgt or Size(cur.width * 4, cur.height * 4)
-            elif tgt is not None:
-                cur = tgt
-            biggest = max(biggest, cur.width * cur.height)
+        _, biggest = _sim(recipe.cycles[k], loop, src, loop, biggest)
+    _, biggest = _sim(finish_steps(recipe, loop, src), loop, src, loop, biggest)
     per_frame = biggest * 3 * 4 * 4  # float32, a few temporaries
     budget = ram * 0.20
     return int(max(1, min(64, budget // per_frame)))
@@ -314,6 +359,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if a.shape[:2] != (src.height, src.width):
                     raise RecipeError(f"{p.name} is {a.shape[1]}x{a.shape[0]}, expected {src}")
             x = torch.from_numpy(np.stack(arrs)).to(device).permute(0, 3, 1, 2).float() / 255.0
+            x = run_lead_in(x, recipe, ctx)
             want = [i for i, p in enumerate(batch) if p.name in contact_names]
 
             for ci in range(1, recipe.iterations + 1):
@@ -328,7 +374,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
-                    u8 = to_uint8(x)
+                    u8 = to_uint8(run_finish(x, recipe, ctx))
                     for p, img in zip(batch, u8):
                         pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
                                                    img, icc, recipe.output))
@@ -372,8 +418,11 @@ def _update_catalog(out_root: Path, source: Path, folder: Path, recipe: Recipe,
         with open(path, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f)
                     if not (r.get("code") == recipe.code() and r.get("source") == source.name)]
-    cyc = " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
-                     for k in dict.fromkeys(recipe.pattern))
+    fin = "auto (SwinIR)" if recipe.finish == "auto" else ", ".join(_describe_step(s) for s in recipe.finish)
+    cyc = ("lead-in: " + ", ".join(_describe_step(s) for s in recipe.lead_in) + " | "
+           + " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
+                        for k in dict.fromkeys(recipe.pattern))
+           + f" | finish: {fin}")
     rows.append({
         "code": recipe.code(), "source": source.name, "folder": str(folder.relative_to(out_root)),
         "slug": recipe.slug(gan), "name": recipe.name, "pattern": ",".join(recipe.pattern),

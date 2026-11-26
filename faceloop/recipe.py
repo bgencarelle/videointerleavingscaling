@@ -1,14 +1,19 @@
 """Pass recipes: what a pass does, as plain JSON-able data.
 
-A pass is a pattern of cycles (A, B, C ...) that alternate in order.
-`iterations` counts single cycles: A, B, A, B ... until `iterations` cycles
-have run. Every `save_every` cycles (and after the last one) the frames are
-saved.
-
-A cycle is a list of steps. Each step picks a width (height follows the
-source aspect) and a method. Cycle 1 starts from the source size; after a
-cycle's last step the frame is landed exactly on the source size with an
-area resize if it is not there already.
+Shape of a pass
+---------------
+lead_in   steps run once, taking the source frames down to the *loop size*
+          (the size after the lead-in).
+cycles    A, B, C ... alternate in `pattern` order. Every cycle starts and
+          ends at the loop size: if a cycle's last step doesn't end there,
+          an area resize lands it. `iterations` counts single cycles.
+finish    takes a *copy* of the frames back to the source size at every save
+          point (every `save_every` cycles and after the last). The loop
+          itself carries on from the small frames, untouched.
+          "auto" (default): SwinIR classical x4 while 4x or more is still
+          needed, then x2 while `finish_threshold` (default 2x) or more is
+          still needed, then area for the rest. Or a list of your own steps.
+          Either way an area resize lands exactly on the source size.
 
 Step kinds
 ----------
@@ -19,7 +24,8 @@ Step kinds
     run the model at its fixed factor, then area-resize to `width`
     ("width" may be omitted: keep the model's own output size)
 
-`width` may be the string "source" for the source width.
+`width` is pixels, or "source" (source width), or "loop" (the loop size;
+not allowed in the lead-in, which defines it).
 """
 from __future__ import annotations
 
@@ -30,10 +36,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bump when pixel output for the same recipe would change.
-ENGINE_PIXELS_VERSION = 1
+ENGINE_PIXELS_VERSION = 2
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
                 "bicubic": "bic", "lanczos": "lanc"}
+
+AUTO_FINISH_MODELS = {4: "swinir-classical-x4", 2: "swinir-classical-x2"}
 
 
 class RecipeError(ValueError):
@@ -42,10 +50,13 @@ class RecipeError(ValueError):
 
 @dataclass
 class Recipe:
+    lead_in: list[dict[str, Any]]
     cycles: dict[str, list[dict[str, Any]]]
     pattern: list[str]
     iterations: int
     save_every: int
+    finish: Any = "auto"            # "auto" | list of steps
+    finish_threshold: float = 2.0   # auto finish: AI x2 only while this much is left
     rounding: str = "srgb"          # "srgb" | "linear"
     light: str = "linear"           # kernel steps: "linear" | "encoded"
     output: dict[str, Any] = field(default_factory=lambda: {
@@ -55,16 +66,22 @@ class Recipe:
     # ------------------------------------------------------------------ io
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
-        known = {"cycles", "pattern", "iterations", "save_every", "rounding",
-                 "light", "output", "name"}
-        extra = set(d) - known - {"version", "code", "slug"}
+        known = {"lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
+                 "finish_threshold", "rounding", "light", "output", "name"}
+        extra = set(d) - known - {"version", "code", "slug", "engine", "source"}
         if extra:
             raise RecipeError(f"unknown recipe keys: {sorted(extra)}")
+        if "lead_in" not in d:
+            raise RecipeError("recipe needs a lead_in (steps from the source down to the loop size)")
+        fin = d.get("finish", "auto")
         r = cls(
+            lead_in=[dict(s) for s in d["lead_in"]],
             cycles={k: [dict(s) for s in v] for k, v in d["cycles"].items()},
             pattern=list(d["pattern"]),
             iterations=int(d["iterations"]),
             save_every=int(d["save_every"]),
+            finish=fin if fin == "auto" else [dict(s) for s in fin],
+            finish_threshold=float(d.get("finish_threshold", 2.0)),
             rounding=d.get("rounding", "srgb"),
             light=d.get("light", "linear"),
             output=dict(d.get("output") or {"format": "webp", "quality": 95, "sharp_yuv": True}),
@@ -82,10 +99,13 @@ class Recipe:
         return {
             "version": ENGINE_PIXELS_VERSION,
             "name": self.name,
+            "lead_in": copy.deepcopy(self.lead_in),
             "cycles": copy.deepcopy(self.cycles),
             "pattern": list(self.pattern),
             "iterations": self.iterations,
             "save_every": self.save_every,
+            "finish": copy.deepcopy(self.finish),
+            "finish_threshold": self.finish_threshold,
             "rounding": self.rounding,
             "light": self.light,
             "output": dict(self.output),
@@ -94,12 +114,34 @@ class Recipe:
         }
 
     # ------------------------------------------------------------ checks
+    def all_steps(self):
+        """(where, step) for every step the recipe can run (auto finish excluded)."""
+        for i, s in enumerate(self.lead_in):
+            yield f"lead-in step {i + 1}", s
+        for name in dict.fromkeys(self.pattern):
+            for i, s in enumerate(self.cycles.get(name, [])):
+                yield f"cycle {name} step {i + 1}", s
+        if isinstance(self.finish, list):
+            for i, s in enumerate(self.finish):
+                yield f"finish step {i + 1}", s
+
+    def model_ids(self) -> set[str]:
+        ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
+        if self.finish == "auto":
+            ids |= set(AUTO_FINISH_MODELS.values())
+        return ids
+
     def validate(self, known_models: set[str] | None = None) -> None:
+        if not self.lead_in:
+            raise RecipeError("lead_in is empty: it needs at least one step down to the loop size")
         if not self.pattern:
             raise RecipeError("pattern is empty")
         for c in self.pattern:
             if c not in self.cycles:
                 raise RecipeError(f"pattern uses cycle {c!r}, which is not defined")
+        for name in self.pattern:
+            if not self.cycles[name]:
+                raise RecipeError(f"cycle {name!r} has no steps")
         if self.iterations < 1:
             raise RecipeError("iterations must be >= 1")
         if self.save_every < 1:
@@ -108,32 +150,38 @@ class Recipe:
             raise RecipeError("rounding must be 'srgb' or 'linear'")
         if self.light not in ("linear", "encoded"):
             raise RecipeError("light must be 'linear' or 'encoded'")
+        if not (self.finish == "auto" or isinstance(self.finish, list)):
+            raise RecipeError("finish must be 'auto' or a list of steps")
+        if self.finish_threshold <= 1.0:
+            raise RecipeError("finish_threshold must be more than 1")
         fmt = self.output.get("format", "webp")
         if fmt not in ("webp", "png"):
             raise RecipeError("output format must be 'webp' or 'png'")
-        for name, steps in self.cycles.items():
-            if not steps:
-                raise RecipeError(f"cycle {name!r} has no steps")
-            for i, s in enumerate(steps):
-                where = f"cycle {name} step {i + 1}"
-                op = s.get("op")
-                w = s.get("width")
-                if w is not None and w != "source" and (not isinstance(w, int) or w < 1):
-                    raise RecipeError(f"{where}: width must be a positive integer or 'source'")
-                if op == "resize":
-                    from .kernels import METHODS
-                    if s.get("method") not in METHODS:
-                        raise RecipeError(f"{where}: unknown kernel {s.get('method')!r}")
-                    if w is None:
-                        raise RecipeError(f"{where}: resize needs a width")
-                elif op == "model":
-                    m = s.get("model")
-                    if not m:
-                        raise RecipeError(f"{where}: model step needs a model id")
-                    if known_models is not None and m not in known_models:
-                        raise RecipeError(f"{where}: unknown model {m!r}")
-                else:
-                    raise RecipeError(f"{where}: unknown op {op!r}")
+        from .kernels import METHODS
+        for where, s in self.all_steps():
+            op = s.get("op")
+            w = s.get("width")
+            if w is not None and w not in ("source", "loop") and (not isinstance(w, int) or w < 1):
+                raise RecipeError(f"{where}: width must be a positive integer, 'source' or 'loop'")
+            if w == "loop" and where.startswith("lead-in"):
+                raise RecipeError(f"{where}: the lead-in defines the loop size, so it can't use 'loop'")
+            if op == "resize":
+                if s.get("method") not in METHODS:
+                    raise RecipeError(f"{where}: unknown kernel {s.get('method')!r}")
+                if w is None:
+                    raise RecipeError(f"{where}: resize needs a width")
+            elif op == "model":
+                m = s.get("model")
+                if not m:
+                    raise RecipeError(f"{where}: model step needs a model id")
+                if known_models is not None and m not in known_models:
+                    raise RecipeError(f"{where}: unknown model {m!r}")
+            else:
+                raise RecipeError(f"{where}: unknown op {op!r}")
+        if known_models is not None and self.finish == "auto":
+            for m in AUTO_FINISH_MODELS.values():
+                if m not in known_models:
+                    raise RecipeError(f"auto finish needs model {m}")
 
     # ------------------------------------------------------- identity
     def pixel_identity(self) -> dict:
@@ -141,8 +189,11 @@ class Recipe:
         used = {k: self.cycles[k] for k in sorted(set(self.pattern))}
         return {
             "v": ENGINE_PIXELS_VERSION,
+            "lead_in": self.lead_in,
             "cycles": used,
             "pattern": self.pattern,
+            "finish": self.finish,
+            "finish_threshold": self.finish_threshold if self.finish == "auto" else None,
             "rounding": self.rounding,
             "light": self.light,
             "output": self.output,
@@ -153,14 +204,15 @@ class Recipe:
         return hashlib.sha256(blob.encode()).hexdigest()[:4]
 
     def uses_gan(self, gan_models: set[str]) -> bool:
-        return any(s.get("op") == "model" and s.get("model") in gan_models
-                   for k in set(self.pattern) for s in self.cycles[k])
+        return any(m in gan_models for m in self.model_ids())
 
-    def slug(self, gan_models: set[str] | None = None, max_len: int = 72) -> str:
-        parts = []
-        for k in _unique(self.pattern):
-            parts.append("-".join(_step_slug(s) for s in self.cycles[k]))
-        body = "+".join(parts)
+    def slug(self, gan_models: set[str] | None = None, max_len: int = 80) -> str:
+        lead = "-".join(_step_slug(s) for s in self.lead_in)
+        cyc = "+".join("-".join(_step_slug(s) for s in self.cycles[k]) for k in _unique(self.pattern))
+        if self.finish == "auto":
+            fin = "swin" if self.finish_threshold == 2.0 else f"swin{self.finish_threshold:g}"
+        else:
+            fin = "-".join(_step_slug(s) for s in self.finish) or "area"
         flags = []
         if gan_models and self.uses_gan(gan_models):
             flags.append("GAN")
@@ -170,10 +222,11 @@ class Recipe:
             flags.append("enc")
         prefix = _clean(self.name) + "_" if self.name else ""
         tail = ("_" + "_".join(flags)) if flags else ""
-        room = max(8, max_len - len(prefix) - len(tail))
-        if len(body) > room:
-            body = body[:room - 1] + "~"
-        return prefix + body + tail
+        fixed = len(prefix) + len(lead) + len(fin) + len(tail) + 2
+        room = max(8, max_len - fixed)
+        if len(cyc) > room:
+            cyc = cyc[:room - 1] + "~"
+        return f"{prefix}{lead}_{cyc}_{fin}{tail}"
 
     def folder_name(self, gan_models: set[str] | None = None) -> str:
         return f"{self.slug(gan_models)}_{self.code()}"
@@ -189,6 +242,20 @@ class Recipe:
         return pts
 
 
+def auto_finish_steps(cur_width: int, src_width: int, threshold: float = 2.0) -> list[dict]:
+    """SwinIR x4 while >= 4x is left, x2 while >= threshold is left, area lands."""
+    steps = []
+    w = cur_width
+    while src_width / w >= 4:
+        w *= 4
+        steps.append({"op": "model", "model": AUTO_FINISH_MODELS[4], "width": w})
+    while src_width / w >= threshold:  # threshold < 2: x2 overshoots, area brings it down
+        w *= 2
+        steps.append({"op": "model", "model": AUTO_FINISH_MODELS[2], "width": w})
+    steps.append({"op": "resize", "method": "area", "width": "source"})
+    return steps
+
+
 def _unique(seq):
     seen = []
     for x in seq:
@@ -202,9 +269,12 @@ def _clean(s: str) -> str:
     return out.strip("-")[:30]
 
 
+def _width_slug(w) -> str:
+    return {"source": "S", "loop": "L", None: ""}.get(w, str(w))
+
+
 def _step_slug(s: dict) -> str:
-    w = s.get("width")
-    ws = "S" if w == "source" else ("" if w is None else str(w))
+    ws = _width_slug(s.get("width"))
     if s.get("op") == "resize":
         m = KERNEL_SHORT.get(s["method"], s["method"])
         if s.get("antialias") is False:
@@ -213,7 +283,7 @@ def _step_slug(s: dict) -> str:
             m += "FP"
         return f"{m}{ws}"
     if s.get("op") == "model":
-        return f"{model_short(s['model'])}@{ws}" if ws else model_short(s['model'])
+        return f"{model_short(s['model'])}@{ws}" if ws else model_short(s["model"])
     return f"{s.get('op')}{ws}"
 
 

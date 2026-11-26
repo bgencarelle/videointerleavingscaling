@@ -1,20 +1,21 @@
 {
   "name": "demo",
+  "lead_in": [
+    {"op": "resize", "method": "area", "width": 162}
+  ],
   "cycles": {
     "A": [
-      {"op": "resize", "method": "area", "width": 160},
-      {"op": "resize", "method": "nearest", "width": 40},
-      {"op": "model", "model": "w2x-cunet-n1", "width": 80},
-      {"op": "model", "model": "realesr-animevideov3", "width": 320},
-      {"op": "resize", "method": "lanczos", "width": "source"}
+      {"op": "resize", "method": "nearest", "width": 54},
+      {"op": "model", "model": "w2x-cunet-n1", "width": 108},
+      {"op": "model", "model": "realesr-animevideov3", "width": "loop"}
     ],
     "B": [
-      {"op": "resize", "method": "bicubic", "width": 120, "antialias": false},
-      {"op": "model", "model": "rcugan-x2", "width": 240},
-      {"op": "resize", "method": "bilinear", "width": "source", "fixed_point": true}
+      {"op": "resize", "method": "bicubic", "width": 81, "antialias": false},
+      {"op": "model", "model": "rcugan-x2", "width": "loop"}
     ]
   },
   "pattern": ["A", "B"],
   "iterations": 200,
-  "save_every": 25
+  "save_every": 25,
+  "finish": "auto"
 }

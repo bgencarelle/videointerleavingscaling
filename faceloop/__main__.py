@@ -117,7 +117,8 @@ def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, devi
     """Time `frames` frames through a few cycles; return a dict of estimates."""
     import numpy as np
     from .colour import Transfer, curves_from_icc
-    from .engine import StepContext, default_batch_size, pick_device, run_cycle, to_uint8
+    from .engine import (StepContext, default_batch_size, pick_device, run_cycle, run_finish,
+                         run_lead_in, to_uint8)
     from .imageio import list_frames, load_frame, probe, webp_backend
     from .kernels import KernelResizer
     from .sizes import Size
@@ -143,10 +144,13 @@ def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, devi
         elif device.type == "cuda":
             torch.cuda.synchronize()
 
-    # warm-up: one of each cycle (loads models, builds matrices)
+    # lead-in once (not timed: it runs once per frame), then a warm-up of
+    # each cycle and the finish (loads models, builds matrices)
+    x0 = run_lead_in(x0, recipe, ctx)
     x = x0
     for k in dict.fromkeys(recipe.pattern):
         x = run_cycle(x, recipe.cycles[k], ctx)
+    run_finish(x, recipe, ctx)
     sync()
     x = x0
     t = time.time()
@@ -154,6 +158,11 @@ def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, devi
         x = run_cycle(x, recipe.cycles[recipe.cycle_at(i)], ctx)
     sync()
     per = (time.time() - t) / (cycles * n)
+    t = time.time()
+    fin = run_finish(x, recipe, ctx)
+    sync()
+    per_finish = (time.time() - t) / n
+    x = fin
     # output size estimate
     lib, _ = webp_backend()
     sizes = []
@@ -171,8 +180,9 @@ def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, devi
     saves = len(recipe.save_points())
     return {
         "device": str(device), "frames_timed": n, "cycles_timed": cycles, "batch_size": bs,
-        "sec_per_frame_cycle": per, "frames": total_frames, "iterations": recipe.iterations,
-        "est_seconds": per * total_frames * recipe.iterations,
+        "sec_per_frame_cycle": per, "sec_per_frame_finish": per_finish,
+        "frames": total_frames, "iterations": recipe.iterations, "loop": str(ctx.loop),
+        "est_seconds": (per * recipe.iterations + per_finish * len(recipe.save_points())) * total_frames,
         "est_bytes": avg * total_frames * saves, "saves": saves, "size": str(src),
     }
 
@@ -185,9 +195,10 @@ def cmd_bench(args):
     r.validate(mm.known_ids())
     res = bench(r, Path(args.source), frames=args.frames, cycles=args.cycles,
                 device=pick_device(args.device), models=mm)
-    print(f"device {res['device']}, source {res['frames']} frames at {res['size']}")
+    print(f"device {res['device']}, source {res['frames']} frames at {res['size']}, loop size {res['loop']}")
     print(f"timed {res['frames_timed']} frames x {res['cycles_timed']} cycles: "
-          f"{res['sec_per_frame_cycle'] * 1000:.1f} ms per frame per cycle")
+          f"{res['sec_per_frame_cycle'] * 1000:.1f} ms per frame per cycle, "
+          f"finish {res['sec_per_frame_finish'] * 1000:.1f} ms per frame per save")
     print(f"estimated pass: {_fmt_secs(res['est_seconds'])} for {res['iterations']} cycles, "
           f"disk {_fmt_bytes(res['est_bytes'])} ({res['saves']} saved loops)")
     return 0

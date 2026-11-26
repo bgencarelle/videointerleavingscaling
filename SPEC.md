@@ -4,7 +4,8 @@ A native Apple Silicon tool that repeatedly downscales and upscales an image
 sequence, driven from a small local browser page. This file records every
 decision; it is updated whenever a decision changes.
 
-Status: stages 1 (engine) and 2 (models) are built. The GUI is stage 5.
+Status: stages 1 (engine) and 2 (models) are built, with the lead-in /
+loop / finish pass shape. The GUI is stage 5.
 
 ## Passes
 
@@ -14,18 +15,30 @@ Status: stages 1 (engine) and 2 (models) are built. The GUI is stage 5.
 - **Colour profile:** the source profile is kept and embedded in the output.
   Its tone curve (rTRC/gTRC/bTRC, `curv` or `para`) is used for linear light.
   Missing or unreadable profile: sRGB is assumed and the run log says so.
-- **Cycle:** a list of steps. Each step is a target width plus a method. The
-  height follows the source aspect, rounded to the nearest whole pixel (the
-  error is under half a pixel; the GUI will show it). Cycle 1 starts from the
-  source size. Every cycle ends exactly at the source size: if the last step
-  doesn't land there, an **area** resize lands it.
-- **Width** is a number of pixels or `"source"`.
-- **Model steps:** run the model at its fixed factor (x1, x2, x3 or x4), then an
-  area resize to the step's width. Without a width the model's own output
-  size is kept (the cycle still lands on the source at the end).
-- **Pass:** a pattern of any number of cycles (A, B, C, ...) alternating in
-  order. `iterations` counts single cycles (A, B, A, B ... until N cycles
-  have run). Frames are saved every `save_every` cycles and after the last.
+- **Pass shape:**
+  1. **lead-in:** steps run once, taking the source frames down to the
+     *loop size* (the size after the lead-in).
+  2. **cycles:** A, B, C, ... alternate in `pattern` order. Every cycle starts
+     and ends at the loop size: if its last step doesn't end there, an area
+     resize lands it. `iterations` counts single cycles.
+  3. **finish:** at each save point (every `save_every` cycles and after the
+     last), a *copy* is taken back to the source size and saved. The loop
+     carries on from the small frames, untouched.
+- **Steps:** each step is a target width plus a method. The height follows
+  the source aspect, rounded to the nearest whole pixel. Width is pixels,
+  `"source"`, or `"loop"` (`"loop"` isn't allowed in the lead-in, which
+  defines the loop size). Only widths that keep the aspect exactly avoid
+  rounding: for 810x1080 (3:4) that means multiples of 3.
+- **Model steps:** run the model at its fixed factor (x1, x2, x3 or x4), then
+  an area resize to the step's width. Without a width the model's own output
+  size is kept.
+- **Finish:** `"auto"` (default) is the transparent, upscaling-only
+  **SwinIR classical**: x4 while 4x or more is still needed, then x2 while
+  `finish_threshold` (default 2x) or more is still needed. Once less is left,
+  plain **area** covers the rest (not AI). Or write your own finish steps (AI
+  or not). Either way an area resize lands exactly on the source size.
+  Example: loop 162 wide → SwinIR x4 → 648 → area → 810.
+- Replaces the first design, where every cycle returned to the source size.
 - **Queue:** passes are built by hand and run one after another. No grid.
 
 ## Methods
@@ -101,11 +114,14 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 
 - `OUT/<source folder name>/<slug>_<code>/c0025/ c0050/ ...`
 - The `code` is 4 hex characters made from everything that decides the
-  pixels: cycles, pattern, rounding, light and output settings. Iterations
+  pixels: lead-in, cycles, pattern, finish, rounding, light and output
+  settings. Iterations
   and save-every are not part of it, so a longer run of the same recipe
   reuses the folder.
-- The `slug` is readable: steps as `area160`, `near40`, `w2xcunetn1@80`,
-  `avv3@320`, `lancS` (S = source); cycles joined with `+`; then flags `GAN`
+- The `slug` is readable: `<lead-in>_<cycles>_<finish>`. Steps are written
+  like `area162`, `near54`, `w2xcunetn1@108`, `avv3@L` (L = loop size,
+  S = source); cycles are joined with `+`; the finish is `swin` for auto.
+  Then come the flags `GAN`
   (any GAN-labelled model), `rlin` (linear rounding), `enc` (no linear light).
   Long slugs are shortened with `~` but always keep the flags.
 - **Frames:** lossy WebP q95 with sharp_yuv through the native libwebp

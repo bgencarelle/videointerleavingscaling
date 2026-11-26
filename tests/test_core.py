@@ -10,7 +10,7 @@ from faceloop.colour import (GammaCurve, ParametricCurve, SRGBCurve, TableCurve,
                              curves_from_icc, quantize)
 from faceloop.engine import run_pass, run_cycle, StepContext, Controls, Progress
 from faceloop.kernels import METHODS, KernelResizer, weights_1d
-from faceloop.recipe import Recipe, RecipeError
+from faceloop.recipe import Recipe, RecipeError, auto_finish_steps
 from faceloop.sizes import Size, aspect_error, height_for, size_for
 
 
@@ -148,9 +148,11 @@ def test_fixed_point_differs_but_stays_close():
 # ------------------------------------------------------------------ recipe
 def _recipe(**kw):
     d = {
+        "lead_in": [{"op": "resize", "method": "area", "width": 32}],
+        "finish": [{"op": "resize", "method": "lanczos", "width": "source"}],
         "cycles": {
             "A": [{"op": "resize", "method": "area", "width": 16},
-                  {"op": "resize", "method": "lanczos", "width": 32}],
+                  {"op": "resize", "method": "lanczos", "width": "loop"}],
             "B": [{"op": "resize", "method": "nearest", "width": 8}],
         },
         "pattern": ["A", "B"], "iterations": 5, "save_every": 2,
@@ -254,3 +256,48 @@ def test_linear_light_differs_from_encoded(tmp_path):
     a = run_cycle(x, steps, ctx_lin)
     b = run_cycle(x, steps, ctx_enc)
     assert a.mean() > b.mean()  # linear light keeps bright detail brighter
+
+
+# ------------------------------------------------------------------ new pass shape
+def test_auto_finish_chain():
+    def plan(cur, threshold=2.0):
+        return [(s.get("model", s.get("method")), s["width"]) for s in auto_finish_steps(cur, 810, threshold)]
+    assert plan(162) == [("swinir-classical-x4", 648), ("area", "source")]
+    assert plan(40) == [("swinir-classical-x4", 160), ("swinir-classical-x4", 640), ("area", "source")]
+    assert plan(300) == [("swinir-classical-x2", 600), ("area", "source")]
+    assert plan(450) == [("area", "source")]                      # under 2x left: no AI
+    assert plan(450, 1.5) == [("swinir-classical-x2", 900), ("area", "source")]
+    assert plan(810) == [("area", "source")]
+
+
+def test_cycles_run_at_loop_size_and_saves_are_full_size(tmp_path):
+    src, _ = _make_source(tmp_path)
+    sizes = []
+
+    def on_contact(cycle, step_i, names, imgs):
+        sizes.append((cycle, step_i, imgs.shape[1:3]))
+
+    r = _recipe(iterations=2, save_every=1)
+    res = run_pass(r, src, tmp_path / "out", device=torch.device("cpu"), batch_size=8, on_contact=on_contact)
+    # cycle A: area 16 -> 12x16, lanczos back to the loop size 32x24
+    assert ("A", 0, (12, 16)) in sizes and ("A", 1, (24, 32)) in sizes
+    # cycle B: nearest 8, then the automatic landing back on the loop size
+    assert ("B", 0, (6, 8)) in sizes and ("B", 1, (24, 32)) in sizes
+    for c in ("c0001", "c0002"):
+        im = Image.open(next((res.folder / c).glob("*.webp")))
+        assert im.size == (64, 48)
+
+
+def test_lead_in_cannot_use_loop_width():
+    with pytest.raises(RecipeError):
+        _recipe(lead_in=[{"op": "resize", "method": "area", "width": "loop"}])
+    with pytest.raises(RecipeError):
+        _recipe(lead_in=[])
+
+
+def test_finish_changes_code_but_not_loop():
+    a = _recipe()
+    b = _recipe(finish="auto")
+    assert a.code() != b.code()
+    assert b.slug().endswith("_swin")
+    assert "swinir-classical-x4" in b.model_ids()

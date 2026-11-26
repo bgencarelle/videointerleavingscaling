@@ -39,39 +39,47 @@ frames.
 
 ## Recipes
 
-A recipe is a JSON file. Cycles alternate in `pattern` order; `iterations`
-counts single cycles.
+A recipe is a JSON file with three parts:
+
+- **lead-in:** runs once, from the source down to the loop size.
+- **cycles:** alternate in `pattern` order at the loop size. `iterations`
+  counts single cycles.
+- **finish:** at every save point, a copy is taken back to full size.
 
 ```json
 {
   "name": "demo",
+  "lead_in": [
+    {"op": "resize", "method": "area", "width": 162}
+  ],
   "cycles": {
     "A": [
-      {"op": "resize", "method": "area",    "width": 160},
-      {"op": "resize", "method": "nearest", "width": 40},
-      {"op": "model",  "model": "w2x-cunet-n1",         "width": 80},
-      {"op": "model",  "model": "realesr-animevideov3", "width": 320}
+      {"op": "resize", "method": "nearest", "width": 54},
+      {"op": "model",  "model": "w2x-cunet-n1",         "width": 108},
+      {"op": "model",  "model": "realesr-animevideov3", "width": "loop"}
     ],
     "B": [
-      {"op": "resize", "method": "bicubic", "width": 120, "antialias": false},
-      {"op": "model",  "model": "rcugan-x2", "width": 240},
-      {"op": "resize", "method": "bilinear", "width": "source", "fixed_point": true}
+      {"op": "resize", "method": "bicubic", "width": 81, "antialias": false},
+      {"op": "model",  "model": "rcugan-x2", "width": "loop"}
     ]
   },
   "pattern": ["A", "B"],
   "iterations": 200,
   "save_every": 25,
-  "rounding": "srgb",
-  "light": "linear"
+  "finish": "auto"
 }
 ```
 
 - `method`: `nearest`, `area`, `bilinear`, `bicubic`, `lanczos`
   - `"antialias": false`: shrink without prefiltering
   - `"fixed_point": true`: low-precision maths like old hardware scalers
-- `width`: pixels, or `"source"`. Height follows the source aspect.
+- `width`: pixels, `"source"`, or `"loop"`. Height follows the source aspect;
+  for 810x1080 frames, multiples of 3 keep it exact.
 - A model step runs the model, then area-resizes to `width`.
-- If a cycle doesn't end at the source size, an area resize lands it there.
+- A cycle that doesn't end at the loop size is landed there with area.
+- `finish`: `"auto"` uses SwinIR classical (x4 while 4x or more is left, x2
+  while `finish_threshold`, default 2, or more is left), then area for the
+  rest. Or give a list of steps. It always lands exactly on the source size.
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
 - `light`: `"linear"` (default) or `"encoded"`.
 - `output`: default `{"format": "webp", "quality": 95, "sharp_yuv": true}`;
@@ -103,7 +111,7 @@ run code.
 runs/
   catalog.csv
   <source folder>/
-    demo_area160-near40-w2xcunetn1@80-avv3@320+..._GAN_5bab/
+    demo_area162_near54-w2xcunetn1@108-avv3@L+..._swin_GAN_xxxx/
       c0025/ c0050/ ...     frames, named like the sources, .webp
       recipe.json           every setting + versions + model checksums
       log.txt

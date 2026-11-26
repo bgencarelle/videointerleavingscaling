@@ -99,7 +99,9 @@ def test_runner_pads_to_model_size_rules():
 def test_short_names_and_gan_flag():
     assert model_short("realesr-animevideov3") == "avv3"
     assert model_short("w2x-cunet-n1") == "w2xcunetn1"
-    r = Recipe.from_dict({"cycles": {"A": [{"op": "resize", "method": "area", "width": 40},
+    r = Recipe.from_dict({"lead_in": [{"op": "resize", "method": "area", "width": 160}],
+                          "finish": [{"op": "resize", "method": "area", "width": "source"}],
+                          "cycles": {"A": [{"op": "resize", "method": "area", "width": 40},
                                            {"op": "model", "model": "realesr-animevideov3", "width": 160}]},
                           "pattern": ["A"], "iterations": 3, "save_every": 1})
     assert r.slug({"realesr-animevideov3"}).endswith("_GAN")
