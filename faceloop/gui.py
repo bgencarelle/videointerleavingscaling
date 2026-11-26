@@ -415,6 +415,37 @@ class App:
         (self.presets_dir / (_safe_name(body["name"]) + ".json")).unlink(missing_ok=True)
         return {"ok": True}
 
+    def api_recent(self, _q):
+        """Finished passes from catalog.csv in every output folder used, newest first."""
+        rows = []
+        for root in self.allowed_roots():
+            cat = root / "catalog.csv"
+            if not cat.exists():
+                continue
+            try:
+                with open(cat, newline="", encoding="utf-8") as f:
+                    for r in csv.DictReader(f):
+                        folder = root / r.get("folder", "")
+                        if not (folder / "recipe.json").exists():
+                            continue
+                        rows.append({"folder": str(folder), "date": r.get("date", ""), "name": r.get("name", ""),
+                                     "slug": r.get("slug", ""), "code": r.get("code", ""),
+                                     "source": r.get("source", ""), "iterations": r.get("iterations", ""),
+                                     "gan": r.get("gan", ""), "out": str(root)})
+            except (OSError, csv.Error):
+                continue
+        rows.sort(key=lambda r: r["date"], reverse=True)
+        return {"recent": rows[:40]}
+
+    def api_recent_load(self, body):
+        folder = Path(body["folder"]).expanduser().resolve()
+        if not any(folder.is_relative_to(r) for r in self.allowed_roots()):
+            raise ValueError("not a pass in a known output folder")
+        info = json.loads((folder / "recipe.json").read_text(encoding="utf-8"))
+        keep = ("name", "lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
+                "rounding", "light", "precision", "output")
+        return {k: info[k] for k in keep if k in info}
+
     def api_results(self, q):
         out = q.get("out", [""])[0] or self.settings.read().get("out", "")
         if not out:
@@ -475,10 +506,10 @@ def _safe_name(s: str) -> str:
 # ----------------------------------------------------------------- http
 GET_ROUTES = {"/api/models": "api_models", "/api/settings": "api_settings", "/api/queue": "api_queue",
               "/api/presets": "api_presets", "/api/results": "api_results",
-              "/api/estimate/status": "api_estimate_status"}
+              "/api/estimate/status": "api_estimate_status", "/api/recent": "api_recent"}
 POST_ROUTES = {"/api/pick_folder": "api_pick_folder", "/api/source": "api_source",
                "/api/preview": "api_preview", "/api/estimate/start": "api_estimate_start",
-               "/api/estimate/cancel": "api_estimate_cancel",
+               "/api/estimate/cancel": "api_estimate_cancel", "/api/recent/load": "api_recent_load",
                "/api/queue/add": "api_queue_add", "/api/queue/action": "api_queue_action",
                "/api/presets/load": "api_preset_load", "/api/presets/save": "api_preset_save",
                "/api/presets/delete": "api_preset_delete"}

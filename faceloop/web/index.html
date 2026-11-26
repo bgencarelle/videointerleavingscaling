@@ -151,6 +151,11 @@
       <button class="primary" id="estimate">Estimate & queue…</button></div>
    </section>
    <section>
+    <h2>Recent <small class="muted">finished passes, from catalog.csv</small></h2>
+    <div class="row"><select id="recentList" style="flex:1;min-width:0"></select><button id="recentLoad">Load</button></div>
+    <div class="muted" id="recentMsg"></div>
+   </section>
+   <section>
     <h2>Presets</h2>
     <div class="row"><select id="presetList" style="flex:1"></select><button id="presetLoad">Load</button><button id="presetDel" class="small">Delete</button></div>
     <div class="row"><input id="presetName" placeholder="preset name" style="flex:1"><button id="presetSave">Save</button></div>
@@ -411,6 +416,14 @@ function bind() {
     const n = $("#presetList").value; if (!n) return;
     const r = await api("/api/presets/load", {name: n}); loadRecipe(r); $("#presetName").value = n; $("#presetMsg").textContent = `loaded "${n}"`;
   };
+  $("#recentLoad").onclick = async () => {
+    const r = RECENT[+$("#recentList").value]; if (!r) return;
+    try {
+      loadRecipe(await api("/api/recent/load", {folder: r.folder}));
+      $("#recentMsg").textContent = `loaded the recipe of ${r.source}/${r.slug}_${r.code} (your source folder is unchanged)`;
+    } catch (e) { $("#recentMsg").textContent = e.message; }
+  };
+  $("#recentList").onfocus = loadRecent;
   $("#presetDel").onclick = async () => {
     const n = $("#presetList").value; if (!n || !confirm(`Delete preset "${n}"?`)) return;
     await api("/api/presets/delete", {name: n}); loadPresets();
@@ -440,6 +453,16 @@ async function loadSource() {
     $("#srcInfo").className = "muted";
   } catch (e) { $("#srcInfo").textContent = e.message; $("#srcInfo").className = "err"; }
   changed();
+}
+
+let RECENT = [];
+async function loadRecent() {
+  try { RECENT = (await api("/api/recent")).recent; } catch (e) { RECENT = []; }
+  $("#recentList").innerHTML = RECENT.map((r, i) => {
+    const when = (r.date || "").replace("T", " ").slice(0, 16);
+    const what = r.name ? `${r.name} · ${r.slug}` : r.slug;
+    return `<option value="${i}" title="${esc(r.folder)}">${esc(when)} · ${esc(r.source)} · ${esc(what)}${r.gan === "yes" ? " · GAN" : ""}</option>`;
+  }).join("") || `<option value="">no finished passes yet</option>`;
 }
 
 async function loadPresets(select) {
@@ -595,7 +618,7 @@ function showTab(t) {
   const m = await api("/api/models"); MODELS = m.models; $("#dev").textContent = "device: " + m.device;
   const s = await api("/api/settings");
   $("#src").value = s.source || ""; $("#out").value = s.out || ""; $("#resOut").value = s.out || "";
-  render(); loadPresets();
+  render(); loadPresets(); loadRecent();
   if (s.source) loadSource();
   setInterval(async () => { try { const r = await api("/api/queue"); $("#qcount").textContent = r.jobs.filter(j => ["queued","running","paused"].includes(j.status)).length || ""; } catch (e) {} }, 5000);
 })();

@@ -119,6 +119,13 @@ def test_estimate_queue_results_and_files(server):
         call("/api/file?path=" + quote(str(src / "f000.png")))
     with pytest.raises(urllib.error.HTTPError):  # wrong Host header (DNS rebinding)
         call("/api/queue", host="evil.example:80")
+    # it shows up under Recent, and loads back as the same recipe
+    rec = call("/api/recent")["recent"]
+    assert rec and rec[0]["code"] == p["code"]
+    back = call("/api/recent/load", {"folder": rec[0]["folder"]})
+    assert back["cycles"] == RECIPE["cycles"] and back["iterations"] == RECIPE["iterations"]
+    with pytest.raises(urllib.error.HTTPError):
+        call("/api/recent/load", {"folder": str(src)})
     # run again: everything is skipped
     call("/api/queue/action", {"id": job["id"], "action": "requeue"})
     j = _wait(call, job["id"], {"done", "failed"})

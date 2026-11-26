@@ -178,7 +178,10 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 - Images are served only from output folders the app knows about.
 1. **Build:** folders; lead-in, cycles and finish as step lists (add,
    reorder, remove); pattern; cycles total; save every; rounding; light;
-   output format. Live preview of every step's size (with the aspect error
+   output format. **Recent:** finished passes from `catalog.csv` in every
+   output folder used, newest first. Loading one fills Build with that
+   pass's exact recipe and leaves the source folder as it is. Live preview
+   of every step's size (with the aspect error
    when a height can't be exact), the loop size, the folder name, the GAN
    flag and the save points. Presets are saved to `presets/<name>.json`.
 2. **Estimate & queue:** a background estimate you can cancel, with

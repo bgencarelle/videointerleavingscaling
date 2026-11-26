@@ -22,7 +22,9 @@ passes are still there next time.
   - the finish (a copy back to full size at each save)
 
   Every step shows the size it produces, and the folder name updates as you
-  go. Save and load your own presets. "Estimate & queue…" times one batch on
+  go. Save and load your own presets. **Recent** lists finished passes
+  (from `catalog.csv`, newest first), and Load puts that exact recipe back
+  in Build. "Estimate & queue…" times one batch on
   the GPU, shows hours and disk space, and asks before adding the pass to
   the queue.
 - **Queue:** passes run one after another, with progress and time left.
