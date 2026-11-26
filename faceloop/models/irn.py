@@ -185,6 +185,13 @@ class Engine:
     ms: float | None = None         # per frame, when it was timed
 
 
+# Mixed precision for Core ML: the elementwise steps that join IRN's blocks
+# (scale, subtract, add) in float32, the convolutions in float16. Tried only
+# when plain float16 on the Neural Engine isn't accurate enough.
+MIXED = frozenset({"sigmoid", "exp", "mul", "sub", "add", "real_div"})
+# ... and if that isn't enough, also the state carried from block to block
+MIXED_STATE = MIXED | {"concat", "slice_by_index", "pixel_shuffle", "pixel_unshuffle"}
+
 ACCURACY = {"fp16": 2 / 255, "fp32": 0.25 / 255}  # mean difference allowed vs PyTorch
 SETUP = {"seconds": 0.0}  # total time spent choosing engines (converting, test runs), this process
 
@@ -336,6 +343,10 @@ class IRN(nn.Module):
             for units in ("ne", "all", "gpu"):
                 yield (f"coreml-{units}", f"{UNIT_LABEL[units]} (float16)",
                        lambda u=units: self._coreml_engine(d, h, w, "fp16", u))
+            yield ("coreml-all-mixed", "Core ML (Neural Engine + GPU), joins in float32",
+                   lambda: self._coreml_engine(d, h, w, "fp16", "all", MIXED))
+            yield ("coreml-all-mixed2", "Core ML (Neural Engine + GPU), joins and state in float32",
+                   lambda: self._coreml_engine(d, h, w, "fp16", "all", MIXED_STATE))
         else:
             yield "coreml-gpu", f"{UNIT_LABEL['gpu']} (float32)", lambda: self._coreml_engine(d, h, w, "fp32", "gpu")
 
@@ -350,7 +361,8 @@ class IRN(nn.Module):
         return Engine("torch-cl", "", lambda x: self._safe(
             lambda t: self._up_raw(t.contiguous(memory_format=cl), net), x, False))
 
-    def _coreml_engine(self, d: str, h: int, w: int, precision: str, units: str) -> Engine:
+    def _coreml_engine(self, d: str, h: int, w: int, precision: str, units: str,
+                       keep_fp32: frozenset = frozenset()) -> Engine:
         from .coreml import FORMAT_VERSION, CoreMLRunner, convert
         s = self.scale
         st = self.path.stat()
@@ -360,8 +372,9 @@ class IRN(nn.Module):
             module, shape = _Down(copy.deepcopy(self.net)), (1, 3, ph, pw)
         else:
             module, shape = _Up(copy.deepcopy(self.net), s, h, w), (1, 3, h, w)
-        name = f"{self.path.stem}-{tag}-{d}-{shape[3]}x{shape[2]}-{precision}-v{FORMAT_VERSION}.mlpackage"
-        pkg = convert(module, shape, self.path.parent / "coreml" / name, precision)
+        mix = {frozenset(): "", MIXED: "-mixed", MIXED_STATE: "-mixed2"}.get(keep_fp32, "-mixedx")
+        name = f"{self.path.stem}-{tag}-{d}-{shape[3]}x{shape[2]}-{precision}{mix}-v{FORMAT_VERSION}.mlpackage"
+        pkg = convert(module, shape, self.path.parent / "coreml" / name, precision, keep_fp32)
         run = CoreMLRunner(pkg, units, precision)
         if d == "down":
             def fn(x):
@@ -408,7 +421,10 @@ class IRN(nn.Module):
         torch_diff = float((out - ref).abs().mean())
         tried = []
         tol = ACCURACY[self.precision]
+        passed = set()
         for name, label, build in cands:
+            if "-mixed" in name and ({"coreml-ne", "coreml-all-mixed"} & passed):
+                continue  # something on the Neural Engine is already accurate enough
             try:
                 t0 = time.time()
                 eng = build()
@@ -419,6 +435,7 @@ class IRN(nn.Module):
                 if not torch.isfinite(out).all() or diff > tol:
                     tried.append(f"{label}: off by {diff * 255:.2f}/255 on average, not used")
                     continue
+                passed.add(name)
                 tried.append(f"{label}: {eng.ms:.1f} ms, off by {diff * 255:.2f}/255 on average"
                              + (f", set up in {setup:.0f} s" if setup >= 2 else ""))
                 if eng.ms < best.ms * 0.95:

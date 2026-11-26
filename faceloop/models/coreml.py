@@ -44,15 +44,19 @@ def unavailable_reason() -> str | None:
     return None
 
 
-def convert(module: torch.nn.Module, shape: tuple[int, ...], path: Path, precision: str) -> Path:
+def convert(module: torch.nn.Module, shape: tuple[int, ...], path: Path, precision: str,
+            keep_fp32: frozenset = frozenset()) -> Path:
     """Trace `module` at `shape` (on the CPU, float32) and save it as an
-    ML program at `path` (.mlpackage) unless it's already there."""
+    ML program at `path` (.mlpackage) unless it's already there. In half
+    precision, ops whose type is in `keep_fp32` stay in float32 (they then
+    run on the GPU or CPU, not the Neural Engine)."""
     path = Path(path)
     if path.exists():
         return path
     with _lock:
         if path.exists():
             return path
+        os.environ.setdefault("TQDM_DISABLE", "1")  # no progress bars in the log
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             import coremltools as ct
@@ -67,7 +71,9 @@ def convert(module: torch.nn.Module, shape: tuple[int, ...], path: Path, precisi
                 inputs=[ct.TensorType(name="x", shape=shape, dtype=io)],
                 outputs=[ct.TensorType(name="y", dtype=io)],
                 convert_to="mlprogram",
-                compute_precision=ct.precision.FLOAT16 if precision == "fp16" else ct.precision.FLOAT32,
+                compute_precision=(ct.precision.FLOAT32 if precision != "fp16" else
+                                   ct.transform.FP16ComputePrecision(op_selector=lambda op: op.op_type not in keep_fp32)
+                                   if keep_fp32 else ct.precision.FLOAT16),
                 minimum_deployment_target=ct.target.macOS14,
             )
         path.parent.mkdir(parents=True, exist_ok=True)
