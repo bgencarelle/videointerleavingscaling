@@ -28,6 +28,11 @@ passes are still there next time.
   the GPU, shows hours and disk space, and asks before adding the pass to
   the queue.
 - **Queue:** passes run one after another, with progress and time left.
+  - "Leave for the Mac" (Off / 10% / 25%) keeps the Mac responsive while a
+    pass runs, by idling the GPU in short gaps and using fewer CPU threads.
+    The output doesn't change, only the speed.
+  - faceloop always leaves 4 GB of memory free, so the Mac doesn't start
+    swapping.
   - Pause/Resume holds between cycles without losing anything.
   - Stop ends after the current step; Continue picks up where it stopped
     (finished frames are skipped).

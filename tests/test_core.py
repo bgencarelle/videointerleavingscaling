@@ -376,3 +376,41 @@ def test_big_batch_matches_small_batches(tmp_path):
     b = run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), batch_size=8)
     for f in sorted((a.folder / "c0003").glob("*.webp")):
         assert f.read_bytes() == (b.folder / "c0003" / f.name).read_bytes()
+
+
+def test_reserve_slices_change_nothing_and_idle(tmp_path, monkeypatch):
+    import time as _time
+    from faceloop import throttle
+    src, _ = _make_source(tmp_path, n=8)
+    r = _recipe(iterations=3, save_every=3)
+    full = run_pass(r, src, tmp_path / "a", device=torch.device("cpu"), batch_size=8)
+    monkeypatch.setattr(throttle, "SLICE", 3)
+    slept = []
+    monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
+    throttle.THROTTLE.set("25")
+    try:
+        res = run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), batch_size=8)
+    finally:
+        throttle.THROTTLE.set("off")
+    for f in sorted((full.folder / "c0003").glob("*.webp")):
+        assert f.read_bytes() == (res.folder / "c0003" / f.name).read_bytes()
+    assert (res.folder / "contact_A.png").exists()
+    assert slept and all(s >= 0 for s in slept)
+    a = Image.open(full.folder / "contact_A.png")
+    b = Image.open(res.folder / "contact_A.png")
+    assert a.size == b.size and a.tobytes() == b.tobytes()
+
+
+def test_pause_keeps_the_reserved_share_idle(monkeypatch):
+    from faceloop import throttle
+    t = throttle.Throttle()
+    slept = []
+    monkeypatch.setattr(throttle.time, "sleep", lambda s: slept.append(s))
+    t.set("25")
+    t.pause_after(3.0)
+    assert abs(slept[0] / (3.0 + slept[0]) - 0.25) < 1e-9
+    t.set("off")
+    t.pause_after(3.0)
+    assert len(slept) == 1
+    with pytest.raises(ValueError):
+        t.set("50")

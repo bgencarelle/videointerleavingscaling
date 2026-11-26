@@ -151,7 +151,18 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   as the batch reaches them, then a marker records the batch.
 - Stop or crash: the next run skips finished frames and redoes only the
   unfinished batch. Pause (GUI) holds between cycles without losing anything.
-- Full speed; no notifications.
+- **Leave for the Mac** (Queue tab: Off / 10% / 25%; remembered; can be
+  changed while a pass runs). See `throttle.py`.
+  - GPU: work runs in slices of 32 frames with idle gaps, so that 10% or 25%
+    of the time is idle. Output is byte-identical (tested).
+  - CPU: fewer PyTorch CPU threads, and the process priority is lowered
+    (nice 10). That stays lowered until restart, because macOS doesn't let a
+    program raise its own priority again.
+  - Estimates include the slow-down.
+  - **Memory:** always, PyTorch's GPU memory is capped so 4 GB of unified
+    memory stays free (no swapping). This applies to the GUI, `run` and
+    `bench`.
+- No notifications.
 
 ## Outputs
 

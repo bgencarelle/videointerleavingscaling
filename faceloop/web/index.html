@@ -58,6 +58,9 @@
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  .seg button { border-radius: 0; margin-right: -1px; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button.on { background: var(--accent); color: #111; border-color: var(--accent); }
   .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; width: 160px; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .st-running { color: var(--accent); } .st-done { color: var(--ok); } .st-failed { color: var(--bad); } .st-paused, .st-stopped { color: var(--dim); }
@@ -169,6 +172,12 @@
 
 <!-- ============================================================ QUEUE -->
 <div class="tab" id="tab-queue">
+  <section>
+   <div class="row" style="margin:0">
+     <label class="f" style="min-width:auto">Leave for the Mac</label>
+     <span id="reserveBtns"></span>
+     <span class="muted" id="reserveNote"></span></div>
+  </section>
   <section>
    <h2>Queue <small class="muted">runs one pass after another; finished frames are skipped when a pass continues</small></h2>
    <table><thead><tr><th>Pass</th><th>Source → output</th><th>Status</th><th>Progress</th><th></th></tr></thead>
@@ -558,7 +567,7 @@ async function estimateAndQueue() {
   d.close();
   const est = st.result;
   const ok = await dialog("Queue this pass?", `<div class="kv">
-      <span>Estimated time</span><b>${esc(est.est_text)}</b>
+      <span>Estimated time</span><b>${esc(est.est_text)}${est.reserve_note ? ` <span class="muted">(${esc(est.reserve_note)})</span>` : ""}</b>
       <span>Disk</span><span>${esc(est.disk_text)} (${est.saves} saved loops)</span>
       <span>Frames</span><span>${est.frames} at ${esc(est.size)}, loop size ${esc(est.loop)}</span>
       <span>Per cycle</span><span>${(est.sec_per_frame_cycle * 1000).toFixed(1)} ms per frame</span>
@@ -576,6 +585,15 @@ async function estimateAndQueue() {
 let qTimer = null;
 async function loadQueue() {
   let r; try { r = await api("/api/queue"); } catch (e) { return; }
+  const th = r.throttle;
+  if (th) {
+    const names = {off: "Off (full speed)", "10": "10%", "25": "25%"};
+    $("#reserveBtns").innerHTML = `<span class="seg">${th.levels.map(l => `<button class="small ${l === th.level ? "on" : ""}" data-res="${l}">${names[l]}</button>`).join("")}</span>`;
+    $("#reserveNote").textContent = (th.level === "off" ? "faceloop uses everything it can" :
+      `the GPU idles ${th.level}% of the time in short gaps, fewer CPU threads`) +
+      (th.cpu_priority_lowered ? " · CPU priority lowered until restart" : "") + (th.memory ? " · " + th.memory : "");
+    document.querySelectorAll("[data-res]").forEach(b => b.onclick = async () => { await api("/api/throttle", {level: b.dataset.res}); loadQueue(); });
+  }
   const active = r.jobs.filter(j => ["queued", "running", "paused"].includes(j.status)).length;
   $("#qcount").textContent = active || "";
   $("#qbody").innerHTML = r.jobs.map((j, i) => {

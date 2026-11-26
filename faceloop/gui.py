@@ -34,6 +34,7 @@ from .imageio import list_frames, probe
 from .models import ModelManager
 from .recipe import Recipe, RecipeError
 from .sizes import Size
+from .throttle import THROTTLE, cap_gpu_memory
 
 REPO = Path(__file__).resolve().parents[1]
 WEB = Path(__file__).with_name("web")
@@ -222,6 +223,12 @@ class App:
         self.device = device or pick_device()
         self.gpu_lock = threading.Lock()
         self.settings = JsonFile(self.state_dir / "settings.json", {"source": "", "out": "", "outs": []})
+        if self.device.type == "mps":
+            print(cap_gpu_memory(4.0))
+        try:
+            THROTTLE.set(self.settings.read().get("reserve", "off"))
+        except ValueError:
+            pass
         self.queue = Queue(self, JsonFile(self.state_dir / "queue.json", []))
         self._probe_cache: dict = {}
         self.estimates: dict = {}
@@ -350,6 +357,10 @@ class App:
                     est["status"] = "running"
                     res = bench(r, src, device=self.device, models=self.models, should_stop=stop,
                                 budget=30.0, on_progress=lambda m: est.__setitem__("progress", m))
+                f = THROTTLE.fraction  # the estimate runs at full speed; a reserve slows the run
+                if f:
+                    res["est_seconds"] /= (1.0 - f)
+                    res["reserve_note"] = f"includes the {int(f * 100)}% left for the Mac"
                 res["est_text"] = _fmt_secs(res["est_seconds"])
                 gb = res["est_bytes"] / 1024 ** 3
                 res["disk_text"] = f"{gb:.1f} GB" if gb >= 1 else f"{res['est_bytes'] / 1024 ** 2:.0f} MB"
@@ -384,7 +395,14 @@ class App:
         return {"ok": True}
 
     def api_queue(self, _q):
-        return {"jobs": self.queue.snapshot(), "device": str(self.device)}
+        return {"jobs": self.queue.snapshot(), "device": str(self.device), "throttle": THROTTLE.describe()}
+
+    def api_throttle(self, body):
+        THROTTLE.set(body["level"])
+        s = self.settings.read()
+        s["reserve"] = body["level"]
+        self.settings.write(s)
+        return THROTTLE.describe()
 
     def api_queue_add(self, body):
         src = str(Path(body["source"]).expanduser())
@@ -517,6 +535,7 @@ GET_ROUTES = {"/api/models": "api_models", "/api/settings": "api_settings", "/ap
 POST_ROUTES = {"/api/pick_folder": "api_pick_folder", "/api/source": "api_source",
                "/api/preview": "api_preview", "/api/estimate/start": "api_estimate_start",
                "/api/estimate/cancel": "api_estimate_cancel", "/api/recent/load": "api_recent_load",
+               "/api/throttle": "api_throttle",
                "/api/queue/add": "api_queue_add", "/api/queue/action": "api_queue_action",
                "/api/presets/load": "api_preset_load", "/api/presets/save": "api_preset_save",
                "/api/presets/delete": "api_preset_delete"}

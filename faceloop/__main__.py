@@ -263,6 +263,9 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
 def cmd_bench(args):
     from .models import ModelManager
     from .engine import pick_device
+    from .throttle import cap_gpu_memory
+    if pick_device(args.device).type == "mps":
+        cap_gpu_memory(4.0)
     r = _load_recipe(args.recipe)
     if args.precision:
         r.precision = args.precision
@@ -288,6 +291,9 @@ def cmd_bench(args):
 
 def cmd_run(args):
     from .engine import pick_device, run_pass
+    from .throttle import cap_gpu_memory
+    if pick_device(args.device).type == "mps":
+        print(cap_gpu_memory(4.0))
     from .models import ModelManager
     r = _load_recipe(args.recipe)
     mm = ModelManager()

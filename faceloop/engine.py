@@ -31,6 +31,7 @@ from .imageio import list_frames, load_frame, probe, save_frame, webp_backend
 from .kernels import KernelResizer
 from .recipe import Recipe, RecipeError
 from .sizes import Size, size_for
+from .throttle import THROTTLE
 
 
 # ------------------------------------------------------------- devices
@@ -147,6 +148,46 @@ def run_lead_in(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tens
     return x
 
 
+def _sync(device: torch.device) -> None:
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elif device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def _cycle_throttled(x, steps, ctx, lock, capture, want, cname, batch, on_contact):
+    """One cycle for a batch. With a reserve set (see throttle.py) the batch
+    runs in slices with idle gaps between them, so the Mac's own use of the
+    GPU gets regular turns. Frames are independent, so results are the same."""
+    sl = THROTTLE.slice_size()
+    if sl is None or x.shape[0] <= sl:
+        t1 = time.time()
+        with lock:
+            if capture:
+                capture(-1, x)
+            y = run_cycle(x, steps, ctx, capture)
+            if sl is not None:
+                _sync(x.device)
+        THROTTLE.pause_after(time.time() - t1)
+        return y
+    parts = []
+    for j in range(0, x.shape[0], sl):
+        xs = x[j:j + sl]
+        cap = None
+        local = [i - j for i in want if j <= i < j + sl] if capture else []
+        if local:
+            def cap(step_i, t, _w=local, _j=j):
+                on_contact(cname, step_i, [batch[_j + i].name for i in _w], to_uint8(t[_w]))
+        t1 = time.time()
+        with lock:
+            if cap:
+                cap(-1, xs)
+            parts.append(run_cycle(xs, steps, ctx, cap))
+            _sync(x.device)
+        THROTTLE.pause_after(time.time() - t1)
+    return torch.cat(parts, 0)
+
+
 def lead_in_chunked(arrs: list[np.ndarray], recipe: Recipe, ctx: StepContext, chunk: int,
                     device: torch.device, lock=None) -> torch.Tensor:
     """Lead-in for a big batch, a few full-size frames at a time, so only the
@@ -155,8 +196,12 @@ def lead_in_chunked(arrs: list[np.ndarray], recipe: Recipe, ctx: StepContext, ch
     parts = []
     for i in range(0, len(arrs), chunk):
         xs = torch.from_numpy(np.stack(arrs[i:i + chunk])).to(device).permute(0, 3, 1, 2).float() / 255.0
+        t1 = time.time()
         with lock:
             parts.append(run_lead_in(xs, recipe, ctx))
+            if THROTTLE.fraction:
+                _sync(device)
+        THROTTLE.pause_after(time.time() - t1)
     return torch.cat(parts, 0)
 
 
@@ -164,8 +209,10 @@ def finish_chunked(x: torch.Tensor, recipe: Recipe, ctx: StepContext, chunk: int
     lock = lock if lock is not None else contextlib.nullcontext()
     parts = []
     for i in range(0, x.shape[0], chunk):
+        t1 = time.time()
         with lock:
             parts.append(to_uint8(run_finish(x[i:i + chunk], recipe, ctx)))
+        THROTTLE.pause_after(time.time() - t1)
     return np.concatenate(parts, 0)
 
 
@@ -612,10 +659,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if on_contact and want and last_of_cycle.get(cname) == ci:
                     def capture(step_i, t, _c=cname, _w=want, _b=batch):
                         on_contact(_c, step_i, [_b[i].name for i in _w], to_uint8(t[_w]))
-                with lock:
-                    if capture:
-                        capture(-1, x)
-                    x = run_cycle(x, cycles[cname], ctx, capture)
+                x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, batch, on_contact)
                 progress.frame_cycles += len(batch)
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"

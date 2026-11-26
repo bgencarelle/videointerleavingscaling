@@ -175,3 +175,16 @@ def test_estimate_has_a_hard_limit(server, monkeypatch):
     assert st["status"] in ("failed", "done")
     if st["status"] == "failed":
         assert "longer than" in st["error"]
+
+
+def test_reserve_setting(server):
+    call, src, out, app = server
+    from faceloop.throttle import THROTTLE
+    try:
+        r = call("/api/throttle", {"level": "10"})
+        assert r["level"] == "10" and call("/api/queue")["throttle"]["level"] == "10"
+        assert app.settings.read()["reserve"] == "10"
+        with pytest.raises(urllib.error.HTTPError):
+            call("/api/throttle", {"level": "99"})
+    finally:
+        THROTTLE.set("off")
