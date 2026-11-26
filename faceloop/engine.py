@@ -120,7 +120,7 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
             x = _kernel(x, t, "area", ctx)
     elif op == "irn":
         from .recipe import irn_id
-        m = ctx.models.get_irn(irn_id(step), x.device)
+        m = ctx.models.get_irn(irn_id(step), x.device, ctx.precision)
         x = (m.down(x) if step["direction"] == "down" else m.up(x)).clamp(0, 1)
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:

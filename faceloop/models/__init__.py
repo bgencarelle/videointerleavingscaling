@@ -317,6 +317,8 @@ class ModelManager:
     def precision_of(self, mid: str, device: torch.device, precision: str) -> str:
         if precision != "fp16":
             return "float32"
+        if self.catalog[mid].family == "irn":
+            return self.get_irn(mid, device, precision).precision_label
         return self.get(mid, device, precision).precision_label
 
     def _load(self, mid: str, device: torch.device) -> ModelRunner:
@@ -357,12 +359,12 @@ class ModelManager:
         runner.descriptor = desc
         return runner
 
-    def get_irn(self, mid: str, device: torch.device):
+    def get_irn(self, mid: str, device: torch.device, precision: str = "fp32"):
         """An IRN network (has .down() and .up()), e.g. 'irn-x4' or 'irnplus-x4'."""
         info = self.catalog.get(mid)
         if info is None or info.family != "irn":
             raise KeyError(f"unknown IRN model {mid!r}")
-        key = (mid, str(device), "irn")
+        key = (mid, str(device), "irn", precision)
         with self._lock:
             if key not in self._loaded:
                 fn = info.args["file"]
@@ -370,7 +372,10 @@ class ModelManager:
                     raise FileNotFoundError(f"{mid} weights missing: put {fn} in "
                                             f"{self.weights_dir / 'irn'} (from the authors' Google Drive)")
                 from .irn import IRN
-                self._loaded[key] = IRN(self.weights_dir / "irn" / fn, info.scale).to(device)
+                net = IRN(self.weights_dir / "irn" / fn, info.scale).to(device)
+                if precision == "fp16":
+                    net.make_half(device)
+                self._loaded[key] = net
                 while len(self._loaded) > self._keep:
                     self._loaded.popitem(last=False)
             self._loaded.move_to_end(key)

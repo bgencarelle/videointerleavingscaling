@@ -11,6 +11,8 @@ IRN is one invertible network used both ways:
   "lost detail" the network learned to push into a latent z, thrown away).
 - up:   run backwards on the small image plus a latent z. The paper samples
   z at random; here z = 0 (its mean), so results are repeatable.
+Half precision (the pass's precision switch) is used only if it passes a
+test run against full precision when the network loads.
 Frames are replicate-padded to a multiple of the scale and cropped after.
 """
 from __future__ import annotations
@@ -133,8 +135,10 @@ class IRN(nn.Module):
     # of frames rarely fits. Frames go through a few at a time; on running
     # out of memory the group shrinks, and as a last resort frames are cut
     # into overlapping tiles.
-    micro = 4
+    micro = 8
     tile: int | None = None
+    dtype = torch.float32          # float16 when half precision is on and passes its test
+    precision_label = "float32"
 
     @torch.no_grad()
     def _down_raw(self, x):
@@ -174,7 +178,29 @@ class IRN(nn.Module):
                 out[..., oy0:oy1, ox0:ox1] = r[..., ry:ry + (oy1 - oy0), rx:rx + (ox1 - ox0)]
         return out
 
+    def make_half(self, device) -> None:
+        """Half precision if it works here: the network in float16, checked on a
+        test frame against full precision (shrink then enlarge); else stays fp32."""
+        x = torch.rand(1, 3, 64, 64, device=device)
+        ref = self._up_raw(self._down_raw(x))
+        self.net.half()
+        self.dtype = torch.float16
+        try:
+            got = self._up_raw(self._down_raw(x.half())).float()
+            if device.type == "mps":
+                torch.mps.synchronize()
+            ok = bool(torch.isfinite(got).all()) and float((got - ref).abs().mean()) < 2 / 255
+        except (RuntimeError, TypeError, NotImplementedError):
+            ok = False
+        if ok:
+            self.precision_label = "float16"
+        else:
+            self.net.float()
+            self.dtype = torch.float32
+            self.precision_label = "float32 (half precision didn't hold up for IRN here)"
+
     def _safe(self, fn, x, down: bool):
+        x = x.to(self.dtype)
         outs, i = [], 0
         while i < x.shape[0]:
             chunk = x[i:i + self.micro]
@@ -193,7 +219,7 @@ class IRN(nn.Module):
                 else:
                     raise
                 continue
-            outs.append(y)
+            outs.append(y.float())
             i += chunk.shape[0]
         return torch.cat(outs, 0)
 

@@ -313,3 +313,16 @@ def test_irn_survives_running_out_of_memory(tmp_path):
     m._down_raw = real_down
     m.micro, m.tile = 4, None
     assert torch.allclose(m.up(x[..., :16, :24]), want_u, atol=1e-5)  # no memory trouble: same result
+
+
+def test_irn_half_precision_or_safe_fallback(tmp_path):
+    _fake_irn_weights(tmp_path, 2)
+    mm = ModelManager(tmp_path)
+    full = mm.get_irn("irn-x2", torch.device("cpu"))
+    half = mm.get_irn("irn-x2", torch.device("cpu"), "fp16")
+    assert half is not full
+    assert half.precision_label.startswith(("float16", "float32"))
+    x = torch.rand(2, 3, 32, 48)
+    a, b = full.up(full.down(x)), half.up(half.down(x))
+    assert b.dtype == torch.float32 and float((a - b).abs().mean()) < 2 / 255
+    assert mm.precision_of("irn-x2", torch.device("cpu"), "fp16") == half.precision_label
