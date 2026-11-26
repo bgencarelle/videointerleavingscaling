@@ -1,0 +1,20 @@
+{
+  "name": "demo",
+  "cycles": {
+    "A": [
+      {"op": "resize", "method": "area", "width": 160},
+      {"op": "resize", "method": "nearest", "width": 40},
+      {"op": "model", "model": "w2x-cunet-n1", "width": 80},
+      {"op": "model", "model": "realesr-animevideov3", "width": 320},
+      {"op": "resize", "method": "lanczos", "width": "source"}
+    ],
+    "B": [
+      {"op": "resize", "method": "bicubic", "width": 120, "antialias": false},
+      {"op": "model", "model": "rcugan-x2", "width": 240},
+      {"op": "resize", "method": "bilinear", "width": "source", "fixed_point": true}
+    ]
+  },
+  "pattern": ["A", "B"],
+  "iterations": 200,
+  "save_every": 25
+}
