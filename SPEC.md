@@ -102,6 +102,25 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 
 ## Engine
 
+- **Batches** live on the GPU at the loop size through all their cycles, so
+  they can be big when the loop size is small: up to 256 frames, limited by
+  20% of RAM for the loop-size frames and 10% for the uint8 source frames
+  (current + prefetched batch). The lead-in and the finish work at full
+  size, so they run in chunks (from 15% of RAM, at most 64 frames).
+- **Prefetch:** the next batch is read from disk while the GPU works on the
+  current one. Tested: one frame per batch and 8 frames per batch give
+  byte-identical output.
+- **Model precision** (per pass): `precision: "fp16"` runs AI models in
+  half precision: float16 where the model supports it (all waifu2x /
+  Real-CUGAN ports, ESRGAN, Compact), else bfloat16 (SwinIR), else full.
+  - The log says which each model got.
+  - The original waifu2x-ncnn-vulkan also used fp16 storage by default.
+  - It changes pixels, so it's part of the code; flag `h16`.
+- **bench** times one batch, then each cycle step on its own (GPU synced
+  around it), and prints where one cycle's time goes. The GUI's estimate
+  dialog shows the same table. `--precision fp16` compares without editing
+  the recipe.
+
 - Frames are processed in batches. The batch size comes from the largest
   image any step produces, using 20% of RAM. Models run in micro-batches,
   falling back to smaller batches and then tiles if the GPU runs out of

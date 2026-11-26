@@ -68,14 +68,15 @@ class ModelRunner:
     smaller batches first, then tiles."""
 
     def __init__(self, info: ModelInfo, module: torch.nn.Module, scale: int, device: torch.device,
-                 multiple_of: int = 1, minimum: int = 0):
+                 multiple_of: int = 1, minimum: int = 0, dtype: torch.dtype = torch.float32):
         self.info = info
         self.module = module
         self.scale = scale
         self.device = device
         self.multiple_of = multiple_of
         self.minimum = minimum
-        self.micro = 8
+        self.dtype = dtype
+        self.micro = 16
         self.tile: int | None = None
 
     def _pad_req(self, x):
@@ -90,7 +91,7 @@ class ModelRunner:
     @torch.no_grad()
     def _run(self, x):
         xp, h, w = self._pad_req(x)
-        y = self.module(xp)
+        y = self.module(xp.to(self.dtype)).float()
         return y[..., :h * self.scale, :w * self.scale]
 
     def _run_tiled(self, x, tile, overlap=16):
@@ -246,18 +247,39 @@ class ModelManager:
             os.replace(tmp, dest)
 
     # ---------------------------------------------------------- loading
-    def get(self, mid: str, device: torch.device) -> ModelRunner:
-        key = (mid, str(device))
+    def get(self, mid: str, device: torch.device, precision: str = "fp32") -> ModelRunner:
+        """precision "fp16" runs the model in half precision: float16 where the
+        model supports it, else bfloat16, else full precision (see runner.dtype)."""
+        key = (mid, str(device), precision)
         with self._lock:
             if key in self._loaded:
                 self._loaded.move_to_end(key)
                 return self._loaded[key]
             runner = self._load(mid, device)
+            if precision == "fp16":
+                runner.dtype = self._half_dtype(runner)
+                runner.module = runner.module.to(runner.dtype)
             self._loaded[key] = runner
             while len(self._loaded) > self._keep:
                 self._loaded.popitem(last=False)
                 _empty_cache(device)
             return runner
+
+    @staticmethod
+    def _half_dtype(runner: ModelRunner) -> torch.dtype:
+        desc = getattr(runner, "descriptor", None)
+        if desc is None:  # our ncnn ports: fine in float16 (the ncnn programs used it too)
+            return torch.float16
+        if desc.supports_half:
+            return torch.float16
+        if desc.supports_bfloat16:
+            return torch.bfloat16
+        return torch.float32
+
+    def precision_of(self, mid: str, device: torch.device, precision: str) -> str:
+        if precision != "fp16":
+            return "fp32"
+        return str(self.get(mid, device, precision).dtype).replace("torch.", "")
 
     def _load(self, mid: str, device: torch.device) -> ModelRunner:
         if mid not in self.catalog:
@@ -292,8 +314,10 @@ class ModelManager:
             info.args = {"arch": desc.architecture.id}
         desc.to(device).eval()
         req = desc.size_requirements
-        return ModelRunner(info, desc.model, desc.scale, device,
-                           multiple_of=req.multiple_of, minimum=req.minimum)
+        runner = ModelRunner(info, desc.model, desc.scale, device,
+                             multiple_of=req.multiple_of, minimum=req.minimum)
+        runner.descriptor = desc
+        return runner
 
     def check(self, mid: str, device: torch.device) -> tuple[bool, str]:
         """Load and run a tiny frame natively on `device`."""

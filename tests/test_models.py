@@ -27,7 +27,7 @@ class FakeManager:
         info = ModelInfo("fake-x2", "dropin", "accuracy", 2, "test")
         self.runner = ModelRunner(info, NearestX2(), 2, torch.device("cpu"))
 
-    def get(self, mid, device):
+    def get(self, mid, device, precision="fp32"):
         return self.runner
 
     def known_ids(self):
@@ -169,3 +169,41 @@ def test_waifu2x_does_not_shift_the_picture():
 
     (ax, ay), (bx, by) = c(x, 1), c(y, 2)
     assert abs(ax - bx) < 0.1 and abs(ay - by) < 0.1
+
+
+def test_half_precision_runner_casts_and_returns_float32():
+    seen = {}
+
+    class Rec(torch.nn.Module):
+        def forward(self, x):
+            seen["dtype"] = x.dtype
+            return NearestX2()(x)
+
+    r = ModelRunner(ModelInfo("h", "dropin", "accuracy", 2, ""), Rec(), 2, torch.device("cpu"),
+                    dtype=torch.bfloat16)
+    y = r(torch.rand(2, 3, 8, 8))
+    assert seen["dtype"] == torch.bfloat16 and y.dtype == torch.float32
+
+
+def test_precision_in_recipe():
+    base = {"lead_in": [{"op": "resize", "method": "area", "width": 16}], "finish": [],
+            "pattern": ["A"], "iterations": 1, "save_every": 1}
+    plain = {"A": [{"op": "resize", "method": "nearest", "width": 8}]}
+    model = {"A": [{"op": "model", "model": "w2x-cunet", "width": "loop"}]}
+    # without models precision changes nothing
+    assert Recipe.from_dict({**base, "cycles": plain}).code() == \
+        Recipe.from_dict({**base, "cycles": plain, "precision": "fp16"}).code()
+    a = Recipe.from_dict({**base, "cycles": model})
+    b = Recipe.from_dict({**base, "cycles": model, "precision": "fp16"})
+    assert a.code() != b.code() and b.slug().endswith("_h16")
+
+
+@needs_w2x
+def test_waifu2x_half_precision_is_close():
+    mm = ModelManager(WEIGHTS)
+    dev = torch.device("cpu")
+    x = torch.rand(1, 3, 24, 32)
+    a = mm.get("w2x-cunet", dev, "fp32")(x)
+    b = mm.get("w2x-cunet", dev, "fp16")(x)
+    assert b.dtype == torch.float32
+    assert float((a - b).abs().mean()) < 2 / 255

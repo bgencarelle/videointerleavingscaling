@@ -131,6 +131,9 @@ A recipe is a JSON file with three parts:
 - `finish`: a list of steps back to full size (e.g. one bicubic resize).
   Area lands them exactly on the source size; `[]` means just area.
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
+- `precision`: `"fp32"` (default) or `"fp16"`: AI models in half precision,
+  often much faster on the GPU, with slightly different pixels.
+  `bench ... --precision fp16` lets you compare without editing anything.
 - `light`: `"linear"` (default) or `"encoded"`.
 - `output`: default `{"format": "webp", "quality": 95, "sharp_yuv": true}`;
   `"png"` also works.

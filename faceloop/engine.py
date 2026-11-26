@@ -61,6 +61,7 @@ class StepContext:
     resizer: KernelResizer
     models: object | None  # faceloop.models.ModelManager
     loop: Size | None = None  # size after the lead-in
+    precision: str = "fp32"   # AI models: "fp32" | "fp16"
 
 
 def _target(step: dict, src: Size, cur: Size, loop: Size | None = None) -> Size | None:
@@ -94,7 +95,7 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     elif op == "model":
         if ctx.models is None:
             raise RecipeError("model step used but no models are available")
-        model = ctx.models.get(step["model"], x.device)
+        model = ctx.models.get(step["model"], x.device, ctx.precision)
         x = model(x).clamp(0, 1)
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
@@ -140,6 +141,28 @@ def run_lead_in(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tens
         raise RecipeError(f"lead-in gave {loop}, expected {ctx.loop}")
     ctx.loop = loop
     return x
+
+
+def lead_in_chunked(arrs: list[np.ndarray], recipe: Recipe, ctx: StepContext, chunk: int,
+                    device: torch.device, lock=None) -> torch.Tensor:
+    """Lead-in for a big batch, a few full-size frames at a time, so only the
+    small loop-size frames of the whole batch are held on the GPU."""
+    lock = lock if lock is not None else contextlib.nullcontext()
+    parts = []
+    for i in range(0, len(arrs), chunk):
+        xs = torch.from_numpy(np.stack(arrs[i:i + chunk])).to(device).permute(0, 3, 1, 2).float() / 255.0
+        with lock:
+            parts.append(run_lead_in(xs, recipe, ctx))
+    return torch.cat(parts, 0)
+
+
+def finish_chunked(x: torch.Tensor, recipe: Recipe, ctx: StepContext, chunk: int, lock=None) -> np.ndarray:
+    lock = lock if lock is not None else contextlib.nullcontext()
+    parts = []
+    for i in range(0, x.shape[0], chunk):
+        with lock:
+            parts.append(to_uint8(run_finish(x[i:i + chunk], recipe, ctx)))
+    return np.concatenate(parts, 0)
 
 
 def run_finish(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
@@ -303,16 +326,31 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
     return {"loop": loop, "lead_in": lead, "cycles": cycles, "finish": fin}
 
 
-def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int:
-    """Frames per batch, from the largest image any step produces."""
+MAX_BATCH = 256
+
+
+def batch_sizes(src: Size, recipe: Recipe, ram: int | None = None) -> tuple[int, int]:
+    """(frames per batch, frames per full-size chunk).
+
+    A batch lives on the GPU at the loop size through all its cycles, so it
+    can be big when the loop size is small. The lead-in and the finish work at
+    full size, so they run a few frames (a chunk) at a time."""
     ram = ram or total_ram_bytes()
-    loop, biggest = _sim(recipe.lead_in, src, src, None, src.width * src.height)
+    loop, lead_big = _sim(recipe.lead_in, src, src, None, src.width * src.height)
+    cyc_big = loop.width * loop.height
     for k in set(recipe.pattern):
-        _, biggest = _sim(recipe.cycles[k], loop, src, loop, biggest)
-    _, biggest = _sim(recipe.finish, loop, src, loop, biggest)
-    per_frame = biggest * 3 * 4 * 4  # float32, a few temporaries
-    budget = ram * 0.20
-    return int(max(1, min(64, budget // per_frame)))
+        _, cyc_big = _sim(recipe.cycles[k], loop, src, loop, cyc_big)
+    _, fin_big = _sim(recipe.finish, loop, src, loop, src.width * src.height)
+    f32 = 3 * 4 * 4  # float32 RGB, a few temporaries
+    chunk = int(max(1, min(64, ram * 0.15 // (max(lead_big, fin_big) * f32))))
+    by_gpu = ram * 0.20 // (cyc_big * f32)
+    by_prefetch = ram * 0.10 // (src.width * src.height * 3 * 2)  # uint8 frames: current + next batch
+    batch = int(max(1, min(MAX_BATCH, by_gpu, by_prefetch)))
+    return batch, chunk
+
+
+def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int:
+    return batch_sizes(src, recipe, ram)[0]
 
 
 def source_identity(source: Path) -> dict:
@@ -422,7 +460,9 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     if skipped:
         _log(f"resuming: {skipped} frames already done")
 
-    bs = batch_size or default_batch_size(src, recipe)
+    bs, chunk = batch_sizes(src, recipe)
+    bs = batch_size or bs
+    chunk = min(chunk, bs)
     save_pts = set(recipe.save_points())
     contact_idx = set(contact_indices(len(frames), ident["root"]))
     contact_names = {frames[i].name for i in contact_idx}
@@ -430,7 +470,10 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                      for k in set(recipe.pattern) if any(recipe.cycle_at(i) == k for i in range(1, recipe.iterations + 1))}
 
     ctx = StepContext(src=src, transfer=transfer, light=recipe.light, rounding=recipe.rounding,
-                      resizer=KernelResizer(), models=models)
+                      resizer=KernelResizer(), models=models, precision=recipe.precision)
+    if models is not None and recipe.precision == "fp16":
+        for mid in sorted(recipe.model_ids()):
+            _log(f"{mid} runs in {models.precision_of(mid, device, 'fp16')}")
 
     progress.frames_total = len(frames)
     progress.frames_done = skipped
@@ -438,21 +481,28 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     progress.batches = -(-len(todo) // bs) if todo else 0
     t0 = time.time()
     pool = ThreadPoolExecutor(max_workers=max(2, (os.cpu_count() or 4) // 2))
+    loader = ThreadPoolExecutor(max_workers=4)  # reads the next batch while the GPU works
     pending = []
     stopped = False
+    _log(f"batches of {bs} frames (full-size work in chunks of {chunk})")
+
+    def prefetch(start):
+        return [loader.submit(load_frame, p) for p in todo[start:start + bs]]
+
     try:
+        nxt = prefetch(0) if todo else []
         for bi in range(0, len(todo), bs):
             batch = todo[bi:bi + bs]
             tb = time.time()
             saved_before = progress.images_saved
             progress.batch = bi // bs + 1
-            arrs = list(pool.map(lambda p: load_frame(p)[0], batch))
+            arrs = [f.result()[0] for f in nxt]
+            nxt = prefetch(bi + bs)
             for p, a in zip(batch, arrs):
                 if a.shape[:2] != (src.height, src.width):
                     raise RecipeError(f"{p.name} is {a.shape[1]}x{a.shape[0]}, expected {src}")
-            x = torch.from_numpy(np.stack(arrs)).to(device).permute(0, 3, 1, 2).float() / 255.0
-            with lock:
-                x = run_lead_in(x, recipe, ctx)
+            x = lead_in_chunked(arrs, recipe, ctx, chunk, device, lock)
+            del arrs
             want = [i for i, p in enumerate(batch) if p.name in contact_names]
 
             for ci in range(1, recipe.iterations + 1):
@@ -471,8 +521,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
-                    with lock:
-                        u8 = to_uint8(run_finish(x, recipe, ctx))
+                    u8 = finish_chunked(x, recipe, ctx, chunk, lock)
                     for p, img in zip(batch, u8):
                         progress.images_saved += 1
                         pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
@@ -506,6 +555,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
             except Exception:  # noqa: BLE001
                 pass
         pool.shutdown(wait=True)
+        loader.shutdown(wait=False, cancel_futures=True)
 
     secs = time.time() - t0
     if write and not stopped:

@@ -124,6 +124,10 @@
       <select id="rounding"><option value="srgb">8-bit after each step, like saving a file (sRGB)</option>
         <option value="linear">8-bit in linear light (harsh shadow banding)</option></select></div>
     <div class="row">
+      <label class="f">AI models</label>
+      <select id="precision"><option value="fp32">full precision (fp32)</option>
+        <option value="fp16">half precision (fp16, faster; bf16 where a model needs it)</option></select></div>
+    <div class="row">
       <label class="f">Plain resizes</label>
       <select id="light"><option value="linear">in linear light</option><option value="encoded">on the stored values</option></select></div>
    </section>
@@ -204,14 +208,14 @@ let state = {
   cycles: {A: [{op: "resize", method: "nearest", width: 54}, {op: "resize", method: "bicubic", width: "loop"}]},
   pattern: ["A"], iterations: 200, save_every: 25,
   finish: [{op: "resize", method: "bicubic", width: "source"}],
-  rounding: "srgb", light: "linear", output: {format: "webp", quality: 95, sharp_yuv: true},
+  rounding: "srgb", light: "linear", precision: "fp32", output: {format: "webp", quality: 95, sharp_yuv: true},
 };
 let preview = null;
 
 function recipe() {
   return {name: state.name, lead_in: state.lead_in, cycles: state.cycles, pattern: state.pattern,
           iterations: state.iterations, save_every: state.save_every, finish: state.finish,
-          rounding: state.rounding, light: state.light, output: state.output};
+          rounding: state.rounding, light: state.light, precision: state.precision, output: state.output};
 }
 
 function defaultStep(op) {
@@ -323,6 +327,7 @@ function render() {
   $("#saveEvery").value = state.save_every;
   $("#rounding").value = state.rounding;
   $("#light").value = state.light;
+  $("#precision").value = state.precision;
   $("#format").value = state.output.format;
   changed();
 }
@@ -383,6 +388,7 @@ function bind() {
   $("#saveEvery").onchange = e => { state.save_every = Math.max(1, +e.target.value || 1); changed(); };
   $("#rounding").onchange = e => { state.rounding = e.target.value; changed(); };
   $("#light").onchange = e => { state.light = e.target.value; changed(); };
+  $("#precision").onchange = e => { state.precision = e.target.value; changed(); };
   $("#format").onchange = e => { state.output = e.target.value === "png" ? {format: "png"} : {format: "webp", quality: 95, sharp_yuv: true}; changed(); };
   document.querySelectorAll("[data-add]").forEach(b => b.onclick = () => {
     (b.dataset.add === "lead" ? state.lead_in : state.finish).push(defaultStep("resize")); render();
@@ -419,7 +425,7 @@ function bind() {
 function loadRecipe(r) {
   state = {name: r.name || "", lead_in: r.lead_in, cycles: r.cycles, pattern: r.pattern,
            iterations: r.iterations, save_every: r.save_every, finish: r.finish || [],
-           rounding: r.rounding || "srgb", light: r.light || "linear",
+           rounding: r.rounding || "srgb", light: r.light || "linear", precision: r.precision || "fp32",
            output: r.output || {format: "webp", quality: 95, sharp_yuv: true}};
   render();
 }
@@ -468,8 +474,12 @@ async function estimateAndQueue() {
       <span>Frames</span><span>${est.frames} at ${esc(est.size)}, loop size ${esc(est.loop)}</span>
       <span>Per cycle</span><span>${(est.sec_per_frame_cycle * 1000).toFixed(1)} ms per frame</span>
       <span>Per save</span><span>${(est.sec_per_frame_finish * 1000).toFixed(1)} ms per frame (finish)</span>
-      <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}</span>
-    </div>`, "Add to queue");
+      <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}, models in ${esc(est.precision)}</span>
+    </div>
+    ${est.steps && est.steps.length ? `<div class="muted" style="margin-top:12px">where one cycle's time goes</div>
+      <table style="margin-top:4px">${est.steps.map(st => `<tr><td class="muted">${esc(st.where)}</td><td>${esc(st.step)}</td>
+        <td style="text-align:right;font-family:var(--mono)">${st.ms.toFixed(2)} ms</td>
+        <td style="width:120px"><div class="bar" style="width:110px"><i style="width:${(st.share * 100).toFixed(0)}%"></i></div></td></tr>`).join("")}</table>` : ""}`, "Add to queue");
   if (!ok) return;
   try {
     await api("/api/queue/add", {recipe: recipe(), source: src, out, estimate: {text: est.est_text, disk: est.disk_text}});

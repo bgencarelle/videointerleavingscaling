@@ -315,3 +315,24 @@ def test_chained_pass_on_saved_output(tmp_path):
     # and a third link in the chain
     third = run_pass(r, second.folder / "c0002", out, device=torch.device("cpu"), batch_size=8)
     assert third.folder.parent.name == f"faces_src+{r.code()}c0002+{r.code()}c0002"
+
+
+def test_batch_sizes_big_at_small_loop_sizes():
+    from faceloop.engine import batch_sizes
+    r = Recipe.from_dict({"lead_in": [{"op": "resize", "method": "area", "width": 162}],
+                          "cycles": {"A": [{"op": "resize", "method": "nearest", "width": 54},
+                                           {"op": "resize", "method": "bicubic", "width": "loop"}]},
+                          "pattern": ["A"], "iterations": 1, "save_every": 1,
+                          "finish": [{"op": "resize", "method": "bicubic", "width": "source"}]})
+    batch, chunk = batch_sizes(Size(810, 1080), r, ram=16 * 1024 ** 3)
+    assert batch == 256 and 1 <= chunk <= 64
+
+
+def test_big_batch_matches_small_batches(tmp_path):
+    """Chunked lead-in/finish and prefetching must not change any pixel."""
+    src, _ = _make_source(tmp_path, n=8)
+    r = _recipe(iterations=3, save_every=3)
+    a = run_pass(r, src, tmp_path / "a", device=torch.device("cpu"), batch_size=1)
+    b = run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), batch_size=8)
+    for f in sorted((a.folder / "c0003").glob("*.webp")):
+        assert f.read_bytes() == (b.folder / "c0003" / f.name).read_bytes()

@@ -61,6 +61,7 @@ class Recipe:
     finish: list[dict[str, Any]] = field(default_factory=list)
     rounding: str = "srgb"          # "srgb" | "linear"
     light: str = "linear"           # kernel steps: "linear" | "encoded"
+    precision: str = "fp32"         # AI models: "fp32" | "fp16" (half; bf16 where fp16 isn't supported)
     output: dict[str, Any] = field(default_factory=lambda: {
         "format": "webp", "quality": 95, "sharp_yuv": True})
     name: str = ""                  # optional label, shown in the slug
@@ -69,7 +70,7 @@ class Recipe:
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {"lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
-                 "rounding", "light", "output", "name"}
+                 "rounding", "light", "precision", "output", "name"}
         extra = set(d) - known - {"version", "code", "slug", "engine", "source"}
         if extra:
             raise RecipeError(f"unknown recipe keys: {sorted(extra)}")
@@ -86,6 +87,7 @@ class Recipe:
             finish=[dict(s) for s in d["finish"]],
             rounding=d.get("rounding", "srgb"),
             light=d.get("light", "linear"),
+            precision=d.get("precision", "fp32"),
             output=dict(d.get("output") or {"format": "webp", "quality": 95, "sharp_yuv": True}),
             name=d.get("name", ""),
         )
@@ -109,6 +111,7 @@ class Recipe:
             "finish": copy.deepcopy(self.finish),
             "rounding": self.rounding,
             "light": self.light,
+            "precision": self.precision,
             "output": dict(self.output),
             "code": self.code(),
             "slug": self.slug(),
@@ -147,6 +150,8 @@ class Recipe:
             raise RecipeError("rounding must be 'srgb' or 'linear'")
         if self.light not in ("linear", "encoded"):
             raise RecipeError("light must be 'linear' or 'encoded'")
+        if self.precision not in ("fp32", "fp16"):
+            raise RecipeError("precision must be 'fp32' or 'fp16'")
         if not isinstance(self.finish, list):
             raise RecipeError("finish must be a list of steps")
         fmt = self.output.get("format", "webp")
@@ -198,6 +203,8 @@ class Recipe:
             "rounding": self.rounding,
             "light": self.light,
             "output": self.output,
+            # only matters when a model is used; absent for fp32 so old codes stay
+            **({"precision": self.precision} if self.precision != "fp32" and self.model_ids() else {}),
         }
 
     def code(self) -> str:
@@ -218,6 +225,8 @@ class Recipe:
             flags.append("rlin")
         if self.light == "encoded":
             flags.append("enc")
+        if self.precision == "fp16" and self.model_ids():
+            flags.append("h16")
         prefix = _clean(self.name) + "_" if self.name else ""
         tail = ("_" + "_".join(flags)) if flags else ""
         fixed = len(prefix) + len(lead) + len(fin) + len(tail) + 2

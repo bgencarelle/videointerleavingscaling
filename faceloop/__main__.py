@@ -114,29 +114,33 @@ def _load_recipe(path):
     return Recipe.load(path)
 
 
-def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = None, device=None, models=None):
-    """Time `frames` frames through a few cycles; return a dict of estimates."""
+def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = None, device=None,
+          models=None, profile: bool = True):
+    """Time one batch through a few cycles; return a dict of estimates, plus a
+    per-step breakdown (each step timed on its own, with the GPU synced)."""
+    import io
     import numpy as np
     from .colour import Transfer, curves_from_icc
-    from .engine import (StepContext, default_batch_size, pick_device, run_cycle, run_finish,
-                         run_lead_in, to_uint8)
+    from .engine import (StepContext, apply_step, batch_sizes, finish_chunked, lead_in_chunked,
+                         pick_device, run_cycle, _kernel)
+    from .colour import quantize
     from .imageio import list_frames, load_frame, probe, webp_backend
     from .kernels import KernelResizer
+    from .contact import step_label
     from .sizes import Size
-    import io
     device = device or pick_device()
     allf = list_frames(source)
     if not allf:
         raise SystemExit(f"no frames in {source}")
     w, h, icc = probe(allf[0])
     src = Size(w, h)
-    bs = default_batch_size(src, recipe)
-    # a full batch by default: the GPU is much faster per frame in big batches
+    bs, chunk = batch_sizes(src, recipe)
     n = max(1, min(frames or bs, bs, len(allf)))
     pick = [allf[int(i * (len(allf) - 1) / max(1, n - 1))] for i in range(n)] if n > 1 else allf[:1]
-    x0 = torch.from_numpy(np.stack([load_frame(p)[0] for p in pick])).to(device).permute(0, 3, 1, 2).float() / 255
+    arrs = [load_frame(p)[0] for p in pick]
     ctx = StepContext(src=src, transfer=Transfer(curves_from_icc(icc)[0]), light=recipe.light,
-                      rounding=recipe.rounding, resizer=KernelResizer(), models=models)
+                      rounding=recipe.rounding, resizer=KernelResizer(), models=models,
+                      precision=recipe.precision)
     plen = len(recipe.pattern)
     cycles = cycles or max(plen, min(recipe.iterations, 2 * plen))
 
@@ -146,13 +150,15 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         elif device.type == "cuda":
             torch.cuda.synchronize()
 
-    # lead-in once (not timed: it runs once per frame), then a warm-up of
-    # each cycle and the finish (loads models, builds matrices)
-    x0 = run_lead_in(x0, recipe, ctx)
+    t = time.time()
+    x0 = lead_in_chunked(arrs, recipe, ctx, chunk, device)
+    sync()
+    per_lead = (time.time() - t) / n
+    # warm-up: one of each cycle and the finish (loads models, builds matrices)
     x = x0
     for k in dict.fromkeys(recipe.pattern):
         x = run_cycle(x, recipe.cycles[k], ctx)
-    run_finish(x, recipe, ctx)
+    finish_chunked(x, recipe, ctx, chunk)
     sync()
     x = x0
     t = time.time()
@@ -161,14 +167,33 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     sync()
     per = (time.time() - t) / (cycles * n)
     t = time.time()
-    fin = run_finish(x, recipe, ctx)
+    fin = finish_chunked(x, recipe, ctx, chunk)
     sync()
     per_finish = (time.time() - t) / n
-    x = fin
-    # output size estimate
+
+    steps = []
+    if profile:
+        def timed(label, fn, xin):
+            sync()
+            t1 = time.time()
+            y = fn(xin)
+            sync()
+            steps.append({"where": label[0], "step": label[1], "ms": (time.time() - t1) / n * 1000})
+            return y
+        for k in dict.fromkeys(recipe.pattern):
+            xx = x0
+            for st in recipe.cycles[k]:
+                xx = timed((f"cycle {k}", step_label(st)), lambda a, st=st: apply_step(a, st, ctx), xx)
+            if (xx.shape[-1], xx.shape[-2]) != (ctx.loop.width, ctx.loop.height):
+                xx = timed((f"cycle {k}", "land on loop size"),
+                           lambda a: quantize(_kernel(a, ctx.loop, "area", ctx), ctx.rounding, ctx.transfer), xx)
+        cyc_total = sum(st["ms"] for st in steps) or 1.0
+        for st in steps:
+            st["share"] = st["ms"] / cyc_total
+
     lib, _ = webp_backend()
     sizes = []
-    for img in to_uint8(x):
+    for img in fin:
         if recipe.output.get("format", "webp") == "webp" and lib is not None:
             sizes.append(len(lib.encode_rgb(img, float(recipe.output.get("quality", 95)),
                                             bool(recipe.output.get("sharp_yuv", True)))))
@@ -181,11 +206,12 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     total_frames = len(allf)
     saves = len(recipe.save_points())
     return {
-        "device": str(device), "frames_timed": n, "cycles_timed": cycles, "batch_size": bs,
-        "sec_per_frame_cycle": per, "sec_per_frame_finish": per_finish,
+        "device": str(device), "frames_timed": n, "cycles_timed": cycles, "batch_size": bs, "chunk": chunk,
+        "sec_per_frame_cycle": per, "sec_per_frame_finish": per_finish, "sec_per_frame_lead": per_lead,
         "frames": total_frames, "iterations": recipe.iterations, "loop": str(ctx.loop),
-        "est_seconds": (per * recipe.iterations + per_finish * len(recipe.save_points())) * total_frames,
-        "est_bytes": avg * total_frames * saves, "saves": saves, "size": str(src),
+        "est_seconds": (per * recipe.iterations + per_finish * saves + per_lead) * total_frames,
+        "est_bytes": avg * total_frames * saves, "saves": saves, "size": str(src), "steps": steps,
+        "precision": recipe.precision,
     }
 
 
@@ -193,6 +219,8 @@ def cmd_bench(args):
     from .models import ModelManager
     from .engine import pick_device
     r = _load_recipe(args.recipe)
+    if args.precision:
+        r.precision = args.precision
     mm = ModelManager()
     r.validate(mm.known_ids())
     res = bench(r, Path(args.source), frames=args.frames, cycles=args.cycles,
@@ -203,6 +231,13 @@ def cmd_bench(args):
           f"finish {res['sec_per_frame_finish'] * 1000:.1f} ms per frame per save")
     print(f"estimated pass: {_fmt_secs(res['est_seconds'])} for {res['iterations']} cycles, "
           f"disk {_fmt_bytes(res['est_bytes'])} ({res['saves']} saved loops)")
+    print(f"batches of {res['batch_size']} frames, full-size work in chunks of {res['chunk']}, "
+          f"models in {res['precision']}")
+    if res["steps"]:
+        print("\nwhere one cycle's time goes (each step timed on its own):")
+        for st in res["steps"]:
+            bar = "#" * int(round(st["share"] * 40))
+            print(f"  {st['where']:9s} {st['step'][:42]:42s} {st['ms']:8.2f} ms/frame {st['share'] * 100:5.1f}% {bar}")
     return 0
 
 
@@ -239,6 +274,8 @@ def main(argv=None):
     b.add_argument("--source", required=True)
     b.add_argument("--frames", type=int, default=None, help="frames to time (default: one full batch)")
     b.add_argument("--cycles", type=int, default=None)
+    b.add_argument("--precision", choices=["fp32", "fp16"], default=None,
+                   help="override the recipe's model precision, to compare")
     r = sub.add_parser("run")
     r.add_argument("recipe")
     r.add_argument("--source", required=True)
