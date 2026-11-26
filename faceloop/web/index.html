@@ -458,33 +458,63 @@ function dialog(title, html, okText) {
   });
 }
 
-async function estimateAndQueue() {
+async function queueIt(estimate) {
   const src = $("#src").value.trim(), out = $("#out").value.trim();
+  try {
+    await api("/api/queue/add", {recipe: recipe(), source: src, out, estimate});
+    showTab("queue");
+  } catch (e) { alert(e.message); }
+}
+
+async function estimateAndQueue() {
+  const src = $("#src").value.trim();
   const d = $("#dlg");
+  let eid = null, done = false;
+  const noEst = `<button id="dlgNoEst">Queue without estimate</button>`;
   $("#dlgTitle").textContent = "Measuring…";
-  $("#dlgBody").innerHTML = `<span class="spin"></span> timing one batch on the GPU (models load first; this can take a minute)`;
-  $("#dlgOk").style.display = "none"; $("#dlgCancel").onclick = () => d.close(); d.showModal();
-  let est;
-  try { est = await api("/api/estimate", {recipe: recipe(), source: src}); }
+  $("#dlgBody").innerHTML = `<span class="spin"></span> <span id="estProg">starting</span>
+    <div class="muted" style="margin-top:8px">Times a small sample on the GPU; stops by itself after 90 s at most.</div>
+    <div class="row" style="margin-top:10px">${noEst}</div>`;
+  $("#dlgOk").style.display = "none";
+  const cancel = async () => { done = true; if (eid) await api("/api/estimate/cancel", {id: eid}).catch(() => {}); d.close(); };
+  $("#dlgCancel").onclick = cancel;
+  d.oncancel = cancel;  // Escape key
+  $("#dlgNoEst").onclick = async () => { await cancel(); queueIt(null); };
+  d.showModal();
+  try { eid = (await api("/api/estimate/start", {recipe: recipe(), source: src})).id; }
   catch (e) { $("#dlgTitle").textContent = "Couldn't estimate"; $("#dlgBody").innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  let st;
+  while (!done) {
+    await new Promise(r => setTimeout(r, 500));
+    if (done) return;
+    try { st = await api("/api/estimate/status?id=" + eid); } catch (e) { st = {status: "failed", error: e.message}; }
+    const pr = $("#estProg"); if (pr) pr.textContent = `${st.progress || ""} · ${st.elapsed ?? ""} s`;
+    if (["done", "failed", "cancelled"].includes(st.status)) break;
+  }
+  if (done || st.status === "cancelled") return;
+  d.oncancel = null;
+  if (st.status === "failed") {
+    $("#dlgTitle").textContent = "Couldn't estimate";
+    $("#dlgBody").innerHTML = `<div class="err">${esc(st.error)}</div><div class="row" style="margin-top:10px">${noEst}</div>`;
+    $("#dlgNoEst").onclick = () => { d.close(); queueIt(null); };
+    $("#dlgCancel").onclick = () => d.close();
+    return;
+  }
   d.close();
+  const est = st.result;
   const ok = await dialog("Queue this pass?", `<div class="kv">
       <span>Estimated time</span><b>${esc(est.est_text)}</b>
       <span>Disk</span><span>${esc(est.disk_text)} (${est.saves} saved loops)</span>
       <span>Frames</span><span>${est.frames} at ${esc(est.size)}, loop size ${esc(est.loop)}</span>
       <span>Per cycle</span><span>${(est.sec_per_frame_cycle * 1000).toFixed(1)} ms per frame</span>
       <span>Per save</span><span>${(est.sec_per_frame_finish * 1000).toFixed(1)} ms per frame (finish)</span>
-      <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}, models in ${esc(est.precision)}</span>
+      <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}, models in ${esc(est.precision)}, in ${est.seconds_taken.toFixed(0)} s</span>
     </div>
     ${est.steps && est.steps.length ? `<div class="muted" style="margin-top:12px">where one cycle's time goes</div>
-      <table style="margin-top:4px">${est.steps.map(st => `<tr><td class="muted">${esc(st.where)}</td><td>${esc(st.step)}</td>
-        <td style="text-align:right;font-family:var(--mono)">${st.ms.toFixed(2)} ms</td>
-        <td style="width:120px"><div class="bar" style="width:110px"><i style="width:${(st.share * 100).toFixed(0)}%"></i></div></td></tr>`).join("")}</table>` : ""}`, "Add to queue");
-  if (!ok) return;
-  try {
-    await api("/api/queue/add", {recipe: recipe(), source: src, out, estimate: {text: est.est_text, disk: est.disk_text}});
-    showTab("queue");
-  } catch (e) { alert(e.message); }
+      <table style="margin-top:4px">${est.steps.map(s => `<tr><td class="muted">${esc(s.where)}</td><td>${esc(s.step)}</td>
+        <td style="text-align:right;font-family:var(--mono)">${s.ms.toFixed(2)} ms</td>
+        <td style="width:120px"><div class="bar" style="width:110px"><i style="width:${(s.share * 100).toFixed(0)}%"></i></div></td></tr>`).join("")}</table>` : ""}`, "Add to queue");
+  if (ok) queueIt({text: est.est_text, disk: est.disk_text});
 }
 
 // ------------------------------------------------------------------ queue tab

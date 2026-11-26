@@ -114,10 +114,28 @@ def _load_recipe(path):
     return Recipe.load(path)
 
 
+class EstimateCancelled(Exception):
+    pass
+
+
 def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = None, device=None,
-          models=None, profile: bool = True):
-    """Time one batch through a few cycles; return a dict of estimates, plus a
-    per-step breakdown (each step timed on its own, with the GPU synced)."""
+          models=None, profile: bool = True, should_stop=None, budget: float = 30.0, on_progress=None):
+    """Time a sample of frames through a few cycles; return estimates plus a
+    per-step breakdown (each step timed on its own, with the GPU synced).
+
+    Stays short on purpose: a warm-up on 4 frames measures the speed, the
+    sample size is chosen so the timed part fits in `budget` seconds, and
+    timing stops early when the budget runs out. `should_stop()` is checked
+    between steps; when it returns True, EstimateCancelled is raised."""
+    t_start = time.time()
+
+    def say(msg):
+        if on_progress:
+            on_progress(msg)
+
+    def check():
+        if should_stop and should_stop():
+            raise EstimateCancelled()
     import io
     import numpy as np
     from .colour import Transfer, curves_from_icc
@@ -135,12 +153,14 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     w, h, icc = probe(allf[0])
     src = Size(w, h)
     bs, chunk = batch_sizes(src, recipe)
-    n = max(1, min(frames or bs, bs, len(allf)))
-    pick = [allf[int(i * (len(allf) - 1) / max(1, n - 1))] for i in range(n)] if n > 1 else allf[:1]
-    arrs = [load_frame(p)[0] for p in pick]
+    n_max = max(1, min(frames or 64, bs, len(allf)))
+    n_warm = min(4, n_max)
+    pick_all = [allf[int(i * (len(allf) - 1) / max(1, n_max - 1))] for i in range(n_max)] if n_max > 1 else allf[:1]
+    say(f"reading {n_warm} frames")
+    arrs = [load_frame(p)[0] for p in pick_all[:n_warm]]
     ctx = StepContext(src=src, transfer=Transfer(curves_from_icc(icc)[0]), light=recipe.light,
                       rounding=recipe.rounding, resizer=KernelResizer(), models=models,
-                      precision=recipe.precision)
+                      precision=recipe.precision, check=check)
     plen = len(recipe.pattern)
     cycles = cycles or max(plen, min(recipe.iterations, 2 * plen))
 
@@ -150,26 +170,49 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         elif device.type == "cuda":
             torch.cuda.synchronize()
 
+    # warm-up on a few frames: loads models, builds matrices, measures speed
+    say("loading models and warming up")
+    x = lead_in_chunked(arrs, recipe, ctx, chunk, device)
+    for k in dict.fromkeys(recipe.pattern):
+        check()
+        x = run_cycle(x, recipe.cycles[k], ctx)
+    sync()
     t = time.time()
-    x0 = lead_in_chunked(arrs, recipe, ctx, chunk, device)
+    for k in dict.fromkeys(recipe.pattern):
+        check()
+        x = run_cycle(x, recipe.cycles[k], ctx)
+    sync()
+    rough = (time.time() - t) / (plen * n_warm)  # seconds per frame-cycle
+    # sample size: the timed cycles should take about half the budget
+    n = int(max(n_warm, min(n_max, (budget * 0.5) / max(rough * cycles, 1e-6))))
+    if n > n_warm:
+        say(f"reading {n} frames")
+        arrs += [load_frame(p)[0] for p in pick_all[n_warm:n]]
+    check()
+    t = time.time()
+    x0 = lead_in_chunked(arrs[:n], recipe, ctx, chunk, device)
     sync()
     per_lead = (time.time() - t) / n
-    # warm-up: one of each cycle and the finish (loads models, builds matrices)
-    x = x0
-    for k in dict.fromkeys(recipe.pattern):
-        x = run_cycle(x, recipe.cycles[k], ctx)
-    finish_chunked(x, recipe, ctx, chunk)
-    sync()
     x = x0
     t = time.time()
+    done = 0
     for i in range(1, cycles + 1):
+        check()
+        say(f"timing cycle {i} of {cycles} on {n} frames")
         x = run_cycle(x, recipe.cycles[recipe.cycle_at(i)], ctx)
-    sync()
-    per = (time.time() - t) / (cycles * n)
+        done = i
+        sync()
+        if time.time() - t_start > budget and i >= plen:
+            break
+    per = (time.time() - t) / (done * n)
+    cycles = done
+    check()
+    say("timing the finish")
+    k_fin = min(n, chunk, 8)
     t = time.time()
-    fin = finish_chunked(x, recipe, ctx, chunk)
+    fin = finish_chunked(x[:k_fin], recipe, ctx, chunk)
     sync()
-    per_finish = (time.time() - t) / n
+    per_finish = (time.time() - t) / k_fin
 
     steps = []
     if profile:
@@ -178,11 +221,14 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
             t1 = time.time()
             y = fn(xin)
             sync()
-            steps.append({"where": label[0], "step": label[1], "ms": (time.time() - t1) / n * 1000})
+            steps.append({"where": label[0], "step": label[1], "ms": (time.time() - t1) / xin.shape[0] * 1000})
             return y
+        say("timing each step")
+        k_prof = min(n, 8)
         for k in dict.fromkeys(recipe.pattern):
-            xx = x0
+            xx = x0[:k_prof]
             for st in recipe.cycles[k]:
+                check()
                 xx = timed((f"cycle {k}", step_label(st)), lambda a, st=st: apply_step(a, st, ctx), xx)
             if (xx.shape[-1], xx.shape[-2]) != (ctx.loop.width, ctx.loop.height):
                 xx = timed((f"cycle {k}", "land on loop size"),
@@ -206,6 +252,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
     total_frames = len(allf)
     saves = len(recipe.save_points())
     return {
+        "seconds_taken": time.time() - t_start,
         "device": str(device), "frames_timed": n, "cycles_timed": cycles, "batch_size": bs, "chunk": chunk,
         "sec_per_frame_cycle": per, "sec_per_frame_finish": per_finish, "sec_per_frame_lead": per_lead,
         "frames": total_frames, "iterations": recipe.iterations, "loop": str(ctx.loop),

@@ -63,6 +63,17 @@ def _wait(call, jid, states, timeout=60):
     raise AssertionError(f"job stuck in {j['status']}")
 
 
+def _estimate(call, recipe, src, timeout=60):
+    eid = call("/api/estimate/start", {"recipe": recipe, "source": str(src)})["id"]
+    t = time.time()
+    while time.time() - t < timeout:
+        st = call(f"/api/estimate/status?id={eid}")
+        if st["status"] in ("done", "failed", "cancelled"):
+            return st
+        time.sleep(0.1)
+    raise AssertionError("estimate never finished")
+
+
 def test_page_and_preview(server):
     call, src, out, app = server
     assert b"faceloop" in call("/")
@@ -91,7 +102,9 @@ def test_presets(server):
 
 def test_estimate_queue_results_and_files(server):
     call, src, out, app = server
-    est = call("/api/estimate", {"recipe": RECIPE, "source": str(src)})
+    est = _estimate(call, RECIPE, src)
+    assert est["status"] == "done", est
+    est = est["result"]
     assert est["est_seconds"] > 0 and est["loop"] == "24x32"
     job = call("/api/queue/add", {"recipe": RECIPE, "source": str(src), "out": str(out),
                                   "estimate": {"text": est["est_text"], "disk": est["disk_text"]}})
@@ -124,3 +137,29 @@ def test_pause_stop_continue(server):
     assert _wait(call, job["id"], {"stopped", "done"})["status"] in ("stopped", "done")
     call("/api/queue/action", {"id": job["id"], "action": "requeue"})
     assert _wait(call, job["id"], {"done", "failed"}, timeout=120)["status"] == "done"
+
+
+def test_estimate_cancel_frees_the_gpu(server):
+    call, src, out, app = server
+    slow = {**RECIPE, "iterations": 100000}
+    eid = call("/api/estimate/start", {"recipe": slow, "source": str(src)})["id"]
+    time.sleep(0.3)
+    call("/api/estimate/cancel", {"id": eid})
+    t = time.time()
+    while call(f"/api/estimate/status?id={eid}")["status"] not in ("cancelled", "done", "failed"):
+        assert time.time() - t < 20, "cancel didn't stop the estimate"
+        time.sleep(0.1)
+    assert app.gpu_lock.acquire(timeout=5)  # the GPU is free again
+    app.gpu_lock.release()
+    # and a queued pass runs
+    job = call("/api/queue/add", {"recipe": RECIPE, "source": str(src), "out": str(out)})
+    assert _wait(call, job["id"], {"done", "failed"})["status"] == "done"
+
+
+def test_estimate_has_a_hard_limit(server, monkeypatch):
+    call, src, out, app = server
+    monkeypatch.setattr(App, "ESTIMATE_LIMIT", 0.5)
+    st = _estimate(call, {**RECIPE, "iterations": 100000}, src)
+    assert st["status"] in ("failed", "done")
+    if st["status"] == "failed":
+        assert "longer than" in st["error"]

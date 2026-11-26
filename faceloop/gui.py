@@ -22,6 +22,8 @@ import time
 import traceback
 import uuid
 import webbrowser
+
+import torch
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -214,6 +216,8 @@ class App:
         self.settings = JsonFile(self.state_dir / "settings.json", {"source": "", "out": "", "outs": []})
         self.queue = Queue(self, JsonFile(self.state_dir / "queue.json", []))
         self._probe_cache: dict = {}
+        self.estimates: dict = {}
+        self._est_lock = threading.Lock()
 
     # ---------------------------------------------------------- helpers
     def remember_out(self, out: str):
@@ -299,16 +303,70 @@ class App:
                 out["errors"].append(f"source: {e}")
         return out
 
-    def api_estimate(self, body):
-        from .__main__ import bench
+    ESTIMATE_LIMIT = 90.0  # seconds; an estimate is cancelled after this
+
+    def api_estimate_start(self, body):
+        """Start an estimate in the background; poll /api/estimate/status."""
+        from .__main__ import EstimateCancelled, bench
         r = Recipe.from_dict(body["recipe"])
         r.validate(self.models.known_ids())
-        with self.gpu_lock:
-            res = bench(r, Path(body["source"]).expanduser(), device=self.device, models=self.models)
-        res["est_text"] = _fmt_secs(res["est_seconds"])
-        gb = res["est_bytes"] / 1024 ** 3
-        res["disk_text"] = f"{gb:.1f} GB" if gb >= 1 else f"{res['est_bytes'] / 1024 ** 2:.0f} MB"
-        return res
+        src = Path(body["source"]).expanduser()
+        self.source_info(str(src))
+        eid = uuid.uuid4().hex[:8]
+        est = {"id": eid, "status": "waiting", "progress": "waiting for the GPU (a running pass finishes its cycle)",
+               "result": None, "error": None, "cancel": False, "started": time.time()}
+        with self._est_lock:
+            for e in self.estimates.values():  # only one at a time: cancel older ones
+                e["cancel"] = True
+            self.estimates[eid] = est
+
+        def stop():
+            if time.time() - est["started"] > self.ESTIMATE_LIMIT:
+                est["error"] = (f"the estimate took longer than {int(self.ESTIMATE_LIMIT)} s and was stopped; "
+                                "this pass is very slow per cycle. You can still queue it without an estimate.")
+                return True
+            return est["cancel"]
+
+        def work():
+            try:
+                with self.gpu_lock:
+                    if stop():
+                        raise EstimateCancelled()
+                    est["status"] = "running"
+                    res = bench(r, src, device=self.device, models=self.models, should_stop=stop,
+                                budget=30.0, on_progress=lambda m: est.__setitem__("progress", m))
+                res["est_text"] = _fmt_secs(res["est_seconds"])
+                gb = res["est_bytes"] / 1024 ** 3
+                res["disk_text"] = f"{gb:.1f} GB" if gb >= 1 else f"{res['est_bytes'] / 1024 ** 2:.0f} MB"
+                est["result"], est["status"] = res, "done"
+            except EstimateCancelled:
+                est["status"] = "failed" if est["error"] else "cancelled"
+            except Exception as e:  # noqa: BLE001
+                est["status"], est["error"] = "failed", f"{type(e).__name__}: {e}"
+                traceback.print_exc()
+            finally:
+                try:
+                    if self.device.type == "mps":
+                        torch.mps.empty_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"id": eid}
+
+    def api_estimate_status(self, q):
+        eid = q.get("id", [""])[0]
+        e = self.estimates.get(eid)
+        if e is None:
+            raise KeyError("no such estimate")
+        return {k: e[k] for k in ("id", "status", "progress", "result", "error")} | \
+            {"elapsed": round(time.time() - e["started"], 1)}
+
+    def api_estimate_cancel(self, body):
+        e = self.estimates.get(body.get("id", ""))
+        if e is not None:
+            e["cancel"] = True
+        return {"ok": True}
 
     def api_queue(self, _q):
         return {"jobs": self.queue.snapshot(), "device": str(self.device)}
@@ -408,9 +466,11 @@ def _safe_name(s: str) -> str:
 
 # ----------------------------------------------------------------- http
 GET_ROUTES = {"/api/models": "api_models", "/api/settings": "api_settings", "/api/queue": "api_queue",
-              "/api/presets": "api_presets", "/api/results": "api_results"}
+              "/api/presets": "api_presets", "/api/results": "api_results",
+              "/api/estimate/status": "api_estimate_status"}
 POST_ROUTES = {"/api/pick_folder": "api_pick_folder", "/api/source": "api_source",
-               "/api/preview": "api_preview", "/api/estimate": "api_estimate",
+               "/api/preview": "api_preview", "/api/estimate/start": "api_estimate_start",
+               "/api/estimate/cancel": "api_estimate_cancel",
                "/api/queue/add": "api_queue_add", "/api/queue/action": "api_queue_action",
                "/api/presets/load": "api_preset_load", "/api/presets/save": "api_preset_save",
                "/api/presets/delete": "api_preset_delete"}

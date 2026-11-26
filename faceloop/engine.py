@@ -62,6 +62,7 @@ class StepContext:
     models: object | None  # faceloop.models.ModelManager
     loop: Size | None = None  # size after the lead-in
     precision: str = "fp32"   # AI models: "fp32" | "fp16"
+    check: Callable[[], None] | None = None  # called before every step; may raise to stop
 
 
 def _target(step: dict, src: Size, cur: Size, loop: Size | None = None) -> Size | None:
@@ -118,6 +119,8 @@ def run_steps(x: torch.Tensor, steps: list[dict], ctx: StepContext, land: Size |
               capture: Callable[[int, torch.Tensor], None] | None = None) -> torch.Tensor:
     """Run steps; then area-land on `land` if the last step didn't end there."""
     for i, step in enumerate(steps):
+        if ctx.check is not None:
+            ctx.check()
         x = apply_step(x, step, ctx)
         if capture:
             capture(i, x)
@@ -471,6 +474,11 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
 
     ctx = StepContext(src=src, transfer=transfer, light=recipe.light, rounding=recipe.rounding,
                       resizer=KernelResizer(), models=models, precision=recipe.precision)
+
+    def _stop_check():  # Stop takes effect between steps, not only between cycles
+        if controls.stop_requested:
+            raise StopRequested()
+    ctx.check = _stop_check
     if models is not None and recipe.precision == "fp16":
         for mid in sorted(recipe.model_ids()):
             _log(f"{mid} runs in {models.precision_of(mid, device, 'fp16')}")

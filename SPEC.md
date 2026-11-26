@@ -173,9 +173,17 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
    output format. Live preview of every step's size (with the aspect error
    when a height can't be exact), the loop size, the folder name, the GAN
    flag and the save points. Presets are saved to `presets/<name>.json`.
-2. **Estimate & queue:** times one batch on the GPU (sharing a lock with the
-   running pass, which waits between cycles), shows time and disk, and
-   queues on confirmation.
+2. **Estimate & queue:** a background estimate you can cancel, with
+   live progress.
+   - It warms up on 4 frames to measure the speed, then picks a sample size
+     so the timed cycles fit about 15 of its 30-second budget, and stops
+     timing early when the budget runs out.
+   - It checks for cancel before every step, and it is stopped after 90 s
+     whatever happens. Measured: cancel frees the GPU in about 1 s.
+   - "Queue without estimate" is always offered.
+   - It shares a lock with the running pass, which waits between cycles.
+   - It shows time, disk and the per-step table, and queues on confirmation.
+   - Stop on a running pass also takes effect between steps now.
 3. **Queue:** `state/queue.json`, run one at a time. Pause/resume between
    cycles; stop; continue/run again; reorder; remove. A pass that was
    running when the app quit is queued again and resumes from the
