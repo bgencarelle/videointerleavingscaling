@@ -381,6 +381,20 @@ class ModelManager:
             self._loaded.move_to_end(key)
             return self._loaded[key]
 
+    def take_notes(self, seen: set, mids=None) -> list[str]:
+        """Messages from loaded networks (e.g. which engine IRN chose) not in
+        `seen` yet (which is updated); only from `mids` if given."""
+        out = []
+        with self._lock:
+            for key, m in self._loaded.items():
+                if mids is not None and key[0] not in mids:
+                    continue
+                for n in getattr(m, "notes", ()):
+                    if n not in seen:
+                        seen.add(n)
+                        out.append(n)
+        return out
+
     def check(self, mid: str, device: torch.device) -> tuple[bool, str]:
         """Load and run a tiny frame natively on `device`."""
         try:

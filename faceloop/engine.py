@@ -683,6 +683,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     loader = ThreadPoolExecutor(max_workers=4)  # reads the next batch while the GPU works
     pending = []
     saved_size = None
+    noted: set[str] = set()
     stopped = False
     _log(f"batches of {bs} frames (full-size work in chunks of {chunk})")
     if auto:
@@ -719,6 +720,9 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                     def capture(step_i, t, _c=cname, _w=want, _b=batch):
                         on_contact(_c, step_i, [_b[i].name for i in _w], to_uint8(t[_w]))
                 x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, batch, on_contact)
+                if ci == 1 and models is not None and hasattr(models, "take_notes"):
+                    for note in models.take_notes(noted, recipe.model_ids()):  # engines chosen in cycle 1
+                        _log(note)
                 progress.frame_cycles += len(batch)
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
@@ -738,6 +742,9 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
                                               "frames": [p.name for p in batch]}))
             if recorder is not None and want:
                 recorder.build()
+            if models is not None and hasattr(models, "take_notes"):
+                for note in models.take_notes(noted, recipe.model_ids()):
+                    _log(note)
             progress.frames_done += len(batch)
             progress.cycle = 0
             dt = time.time() - tb

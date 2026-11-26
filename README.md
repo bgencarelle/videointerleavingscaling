@@ -176,6 +176,12 @@ The list shows every model id, its factor, and its label (`accuracy` or
 (linked from github.com/pkuxmq/Invertible-Image-Rescaling) and put them in
 `weights/irn/`. Then run `selftest`, which checks they load and run.
 
+IRN is a heavy network on the GPU. With half precision on, the first time a
+pass uses it at a frame size it also tries the Neural Engine (via Core ML,
+`coremltools` from `requirements.txt`), checks the result matches, and uses
+whichever is faster. The log says which and how fast. After pulling this
+change, run `.venv/bin/python -m pip install -r requirements.txt` once.
+
 **Your own models:** put a `.pth` or `.safetensors` file in `weights/dropin/`.
 Add a same-name `.json` to label it:
 

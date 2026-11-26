@@ -14,11 +14,24 @@ IRN is one invertible network used both ways:
 Half precision (the pass's precision switch) is used only if it passes a
 test run against full precision when the network loads.
 Frames are replicate-padded to a multiple of the scale and cropped after.
+
+Engines: the first time a pass shrinks or enlarges frames of a given size,
+IRN tries the ways it can run on this Mac on a few of those frames, checks
+each against PyTorch's own result, times them, and keeps the fastest:
+PyTorch on the GPU (as stored, or channels-last), and on macOS with
+coremltools, the network converted to Core ML for the Neural Engine
+(half precision only; the Neural Engine has no float32) or for Core ML's
+GPU path. Converted networks are kept in weights/irn/coreml/.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import math
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -79,17 +92,31 @@ class HaarDownsampling(nn.Module):
         w[3, 0, 0, 1] = -1
         self.haar_weights = nn.Parameter(torch.cat([w] * channel_in, 0), requires_grad=False)
 
+    # The authors do this as a grouped stride-2 convolution plus reshapes that
+    # depend on the frame size. Same sums here as pixel (un)shuffle plus a
+    # fixed 1x1 mixing convolution: no size arithmetic, so the network can be
+    # traced at a fixed size for Core ML, and it's one plain conv on the GPU.
+    def _mix(self, rev: bool, like: torch.Tensor) -> torch.Tensor:
+        key = (rev, like.dtype, like.device)
+        cache = self.__dict__.setdefault("_mix_cache", {})
+        if key not in cache:
+            c = self.channel_in
+            m = self.haar_weights.detach()[:4, 0].reshape(4, 4).double()  # [filter, 2x2 position]
+            eye = torch.eye(c, dtype=torch.float64, device=m.device)
+            # forward: out[f*c + ch] = sum_k m[f, k] * in[ch*4 + k] / 4
+            fwd = torch.einsum("fk,gc->fgck", m, eye).reshape(4 * c, 4 * c) / 4.0
+            w = fwd.t() * 4.0 if rev else fwd  # m m^T = 4 I, so the inverse is 4 * fwd^T
+            cache[key] = w.reshape(4 * c, 4 * c, 1, 1).to(device=like.device, dtype=like.dtype)
+        return cache[key]
+
     def forward(self, x, rev=False):
-        c = self.channel_in
         if not rev:
-            out = F.conv2d(x, self.haar_weights, bias=None, stride=2, groups=c) / 4.0
-            out = out.reshape([x.shape[0], c, 4, x.shape[2] // 2, x.shape[3] // 2])
-            out = torch.transpose(out, 1, 2)
-            return out.reshape([x.shape[0], c * 4, x.shape[2] // 2, x.shape[3] // 2])
-        out = x.reshape([x.shape[0], 4, c, x.shape[2], x.shape[3]])
-        out = torch.transpose(out, 1, 2)
-        out = out.reshape([x.shape[0], c * 4, x.shape[2], x.shape[3]])
-        return F.conv_transpose2d(out, self.haar_weights, bias=None, stride=2, groups=c)
+            return F.conv2d(F.pixel_unshuffle(x, 2), self._mix(False, x))
+        return F.pixel_shuffle(F.conv2d(x, self._mix(True, x)), 2)
+
+    def _apply(self, fn, *args, **kwargs):  # .to() / .half(): rebuild the mixing matrices
+        self.__dict__.pop("_mix_cache", None)
+        return super()._apply(fn, *args, **kwargs)
 
 
 class InvRescaleNet(nn.Module):
@@ -116,11 +143,50 @@ class InvRescaleNet(nn.Module):
         return out
 
 
+class _Down(nn.Module):
+    """Shrink at a fixed (already padded) size, for Core ML."""
+
+    def __init__(self, net):
+        super().__init__()
+        self.net = net
+
+    def forward(self, x):
+        return self.net(x)[:, :3]
+
+
+class _Up(nn.Module):
+    """Enlarge at a fixed size with z = 0, for Core ML."""
+
+    def __init__(self, net, scale, h, w):
+        super().__init__()
+        self.net = net
+        self.register_buffer("z", torch.zeros(1, 3 * (scale * scale - 1), h, w))
+
+    def forward(self, x):
+        return self.net(torch.cat((x, self.z), 1), rev=True)
+
+
+@dataclass
+class Engine:
+    name: str                       # "torch", "torch-cl", "coreml-ne", ...
+    label: str                      # for the log: "the Neural Engine (float16)"
+    fn: Callable[[torch.Tensor], torch.Tensor]
+    ms: float | None = None         # per frame, when it was timed
+
+
+ACCURACY = {"fp16": 2 / 255, "fp32": 0.25 / 255}  # mean difference allowed vs PyTorch
+SETUP = {"seconds": 0.0}  # total time spent choosing engines (converting, test runs), this process
+
+
 class IRN(nn.Module):
     def __init__(self, path: Path, scale: int):
         super().__init__()
         if scale not in (2, 4, 8):
             raise ValueError("IRN scale must be 2, 4 or 8")
+        self.path = Path(path)
+        self.engines: dict[tuple, Engine] = {}
+        self.notes: list[str] = []      # what was chosen, for the pass log
+        self.precision = "fp32"         # requested: "fp16" allows the Neural Engine
         self.scale = scale
         self.net = InvRescaleNet(scale)
         sd = torch.load(str(path), map_location="cpu", weights_only=True)
@@ -141,20 +207,20 @@ class IRN(nn.Module):
     precision_label = "float32"
 
     @torch.no_grad()
-    def _down_raw(self, x):
+    def _down_raw(self, x, net=None):
         s = self.scale
         h, w = x.shape[-2:]
         ph, pw = (-h) % s, (-w) % s
         if ph or pw:
             x = F.pad(x, (0, pw, 0, ph), mode="replicate")
-        return self.net(x)[:, :3][..., : -(-h // s), : -(-w // s)]
+        return (net or self.net)(x)[:, :3][..., : -(-h // s), : -(-w // s)]
 
     @torch.no_grad()
-    def _up_raw(self, x):
+    def _up_raw(self, x, net=None):
         s = self.scale
         n, c, h, w = x.shape
         z = torch.zeros(n, c * (s * s - 1), h, w, device=x.device, dtype=x.dtype)
-        return self.net(torch.cat((x, z), 1), rev=True)
+        return (net or self.net)(torch.cat((x, z), 1), rev=True)
 
     def _tiled(self, fn, x, down: bool):
         s = self.scale
@@ -192,6 +258,7 @@ class IRN(nn.Module):
             ok = bool(torch.isfinite(got).all()) and float((got - ref).abs().mean()) < 2 / 255
         except (RuntimeError, TypeError, NotImplementedError):
             ok = False
+        self.precision = "fp16"  # asked for: lets Core ML try half precision even if PyTorch's failed
         if ok:
             self.precision_label = "float16"
         else:
@@ -224,10 +291,139 @@ class IRN(nn.Module):
         return torch.cat(outs, 0)
 
     def down(self, x: torch.Tensor) -> torch.Tensor:
-        return self._safe(self._down_raw, x, True)
+        return self._run("down", x)
 
     def up(self, x: torch.Tensor) -> torch.Tensor:
-        return self._safe(self._up_raw, x, False)
+        return self._run("up", x)
+
+    # ------------------------------------------------------------ engines
+    def _run(self, d: str, x: torch.Tensor) -> torch.Tensor:
+        key = (d, x.shape[-2], x.shape[-1])
+        eng = self.engines.get(key)
+        if eng is None:
+            eng = self.engines[key] = self._choose(d, x)
+        return eng.fn(x)
+
+    def _torch_engine(self, d: str) -> Engine:
+        raw, down = (self._down_raw, True) if d == "down" else (self._up_raw, False)
+        return Engine("torch", f"PyTorch on {self._device()} ({self.precision_label.split(' ')[0]})",
+                      lambda x: self._safe(raw, x, down))
+
+    def _device(self):
+        return next(self.net.parameters()).device
+
+    def _candidates(self, d: str, h: int, w: int):
+        """(name, label, builder) for every other way to run this here."""
+        dev = self._device()
+        if dev.type == "mps":
+            yield "torch-cl", "PyTorch on mps, channels-last", lambda: self._channels_last_engine(d)
+        from .coreml import UNIT_LABEL, unavailable_reason
+        if dev.type == "cpu" or unavailable_reason() is not None:
+            return
+        if self.precision == "fp16":
+            for units in ("ne", "all"):
+                yield (f"coreml-{units}", f"{UNIT_LABEL[units]} (float16)",
+                       lambda u=units: self._coreml_engine(d, h, w, "fp16", u))
+        else:
+            yield "coreml-gpu", f"{UNIT_LABEL['gpu']} (float32)", lambda: self._coreml_engine(d, h, w, "fp32", "gpu")
+
+    def _channels_last_engine(self, d: str) -> Engine:
+        net = self.__dict__.get("_cl_net")  # not a submodule: stays out of state_dict
+        if net is None:
+            net = self.__dict__["_cl_net"] = copy.deepcopy(self.net).to(memory_format=torch.channels_last)
+        cl = torch.channels_last
+        if d == "down":
+            return Engine("torch-cl", "", lambda x: self._safe(
+                lambda t: self._down_raw(t.contiguous(memory_format=cl), net), x, True))
+        return Engine("torch-cl", "", lambda x: self._safe(
+            lambda t: self._up_raw(t.contiguous(memory_format=cl), net), x, False))
+
+    def _coreml_engine(self, d: str, h: int, w: int, precision: str, units: str) -> Engine:
+        from .coreml import FORMAT_VERSION, CoreMLRunner, convert
+        s = self.scale
+        st = self.path.stat()
+        tag = hashlib.sha256(f"{self.path.name}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()[:8]
+        if d == "down":
+            ph, pw = h + (-h) % s, w + (-w) % s
+            module, shape = _Down(copy.deepcopy(self.net)), (1, 3, ph, pw)
+        else:
+            module, shape = _Up(copy.deepcopy(self.net), s, h, w), (1, 3, h, w)
+        name = f"{self.path.stem}-{tag}-{d}-{shape[3]}x{shape[2]}-{precision}-v{FORMAT_VERSION}.mlpackage"
+        pkg = convert(module, shape, self.path.parent / "coreml" / name, precision)
+        run = CoreMLRunner(pkg, units, precision)
+        if d == "down":
+            def fn(x):
+                if ph != h or pw != w:
+                    x = F.pad(x, (0, pw - w, 0, ph - h), mode="replicate")
+                return run(x)  # (ph/s, pw/s) is already ceil(h/s), ceil(w/s)
+        else:
+            fn = run
+        return Engine(f"coreml-{units}", "", fn)
+
+    def _choose(self, d: str, x: torch.Tensor) -> Engine:
+        """Try every engine on a few of these frames; keep the fastest that
+        matches PyTorch's result."""
+        h, w = x.shape[-2:]
+        best = self._torch_engine(d)
+        cands = list(self._candidates(d, h, w))
+        if not cands:
+            return best
+        t_setup = time.time()
+        try:
+            return self._choose_from(d, x, best, cands)
+        finally:
+            SETUP["seconds"] += time.time() - t_setup
+
+    def _choose_from(self, d, x, best, cands) -> Engine:
+        h, w = x.shape[-2:]
+        sample = x[: min(4, x.shape[0])].float()
+        ref, best.ms = _timed(best.fn, sample)
+        torch_ms = best.ms
+        tried = []
+        tol = ACCURACY[self.precision]
+        for name, label, build in cands:
+            try:
+                t0 = time.time()
+                eng = build()
+                eng.label = label
+                setup = time.time() - t0
+                out, eng.ms = _timed(eng.fn, sample)
+                diff = float((out.float() - ref).abs().mean()) if out.shape == ref.shape else float("inf")
+                if not torch.isfinite(out).all() or diff > tol:
+                    tried.append(f"{label}: off by {diff * 255:.2f}/255 on average, not used")
+                    continue
+                tried.append(f"{label}: {eng.ms:.1f} ms, off by {diff * 255:.2f}/255 on average"
+                             + (f", set up in {setup:.0f} s" if setup >= 2 else ""))
+                if eng.ms < best.ms * 0.95:
+                    best = eng
+            except Exception as e:  # noqa: BLE001
+                tried.append(f"{label}: couldn't run ({type(e).__name__}: {str(e).splitlines()[0][:120] if str(e) else ''})")
+        self.notes.append(f"IRN x{self.scale} {'shrink' if d == 'down' else 'enlarge'} of {w}x{h} frames runs on "
+                          f"{best.label}: {best.ms:.1f} ms per frame (PyTorch {torch_ms:.1f} ms; tried "
+                          + "; ".join(tried) + ")")
+        return best
+
+
+def _sync(device):
+    if device.type == "mps":
+        torch.mps.synchronize()
+    elif device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def _timed(fn, x: torch.Tensor, repeats: int = 2) -> tuple[torch.Tensor, float]:
+    """(output, ms per frame): one warm-up call on a frame, then the best of
+    `repeats` calls on all of x."""
+    fn(x[:1])
+    _sync(x.device)
+    best = float("inf")
+    out = None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        out = fn(x)
+        _sync(x.device)
+        best = min(best, time.perf_counter() - t0)
+    return out, best / x.shape[0] * 1000
 
 
 def _free(device):

@@ -629,7 +629,9 @@ async function estimateAndQueue() {
       <span>Per cycle</span><span>${(est.sec_per_frame_cycle * 1000).toFixed(1)} ms per frame</span>
       <span>Per save</span><span>${(est.sec_per_frame_finish * 1000).toFixed(1)} ms per frame (finish)</span>
       <span>Measured</span><span>${est.frames_timed} frames × ${est.cycles_timed} cycles on ${esc(est.device)}, models in ${esc(est.precision)}, in ${est.seconds_taken.toFixed(0)} s</span>
+      <span>Saved at</span><span>${esc(est.saved_size || est.size)}</span>
     </div>
+    ${(est.notes || []).map(n => `<div class="muted" style="margin-top:8px">${esc(n)}</div>`).join("")}
     ${est.steps && est.steps.length ? `<div class="muted" style="margin-top:12px">where one cycle's time goes</div>
       <table style="margin-top:4px">${est.steps.map(s => `<tr><td class="muted">${esc(s.where)}</td><td>${esc(s.step)}</td>
         <td style="text-align:right;font-family:var(--mono)">${s.ms.toFixed(2)} ms</td>

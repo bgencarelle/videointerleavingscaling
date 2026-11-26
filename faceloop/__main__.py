@@ -172,7 +172,9 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
             torch.cuda.synchronize()
 
     # warm-up on a few frames: loads models, builds matrices, measures speed
-    say("loading models and warming up")
+    say("loading models and warming up" + (" (the first time at a frame size, IRN tries the GPU and the "
+                                            "Neural Engine to pick the faster; converting can take a minute)"
+                                            if any(m.startswith("irn") for m in recipe.model_ids()) else ""))
     x = lead_in_chunked(arrs, recipe, ctx, chunk, device)
     for k in dict.fromkeys(recipe.pattern):
         check()
@@ -258,6 +260,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         "est_bytes": avg * total_frames * saves, "saves": saves, "size": str(src), "steps": steps,
         "saved_size": f"{fin[0].shape[1]}x{fin[0].shape[0]}" if len(fin) else str(src),
         "precision": recipe.precision,
+        "notes": models.take_notes(set(), recipe.model_ids()) if models is not None and hasattr(models, "take_notes") else [],
     }
 
 
@@ -282,6 +285,8 @@ def cmd_bench(args):
           f"disk {_fmt_bytes(res['est_bytes'])} ({res['saves']} saved loops)")
     print(f"batches of {res['batch_size']} frames, full-size work in chunks of {res['chunk']}, "
           f"models in {res['precision']}")
+    for note in res.get("notes", []):
+        print(note)
     if res["steps"]:
         print("\nwhere one cycle's time goes (each step timed on its own):")
         for st in res["steps"]:

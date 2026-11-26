@@ -4,3 +4,4 @@ spandrel>=0.4.1
 safetensors
 numpy>=1.26
 pillow>=10.4
+coremltools>=9.0; sys_platform == "darwin"  # IRN on the Neural Engine

@@ -350,8 +350,12 @@ class App:
                 e["cancel"] = True
             self.estimates[eid] = est
 
+        from .models.irn import SETUP
+        setup0 = SETUP["seconds"]
+
         def stop():
-            if time.time() - est["started"] > self.ESTIMATE_LIMIT:
+            # one-off setup (IRN converting for the Neural Engine) doesn't count
+            if time.time() - est["started"] - (SETUP["seconds"] - setup0) > self.ESTIMATE_LIMIT:
                 est["error"] = (f"the estimate took longer than {int(self.ESTIMATE_LIMIT)} s and was stopped; "
                                 "this pass is very slow per cycle. You can still queue it without an estimate.")
                 return True
