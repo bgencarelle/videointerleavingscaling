@@ -337,12 +337,12 @@ class IRN(nn.Module):
         from .coreml import UNIT_LABEL, unavailable_reason
         if dev.type == "cpu" or unavailable_reason() is not None:
             return
+        # Only the Neural Engine: on your M6, Core ML's "all" path tied with
+        # it, and its GPU paths were never faster than PyTorch, while each
+        # kept big buffers of its own (enough to run a 16 GB Mac out of memory
+        # during the test). Full precision has no Neural Engine, so PyTorch.
         if self.precision == "fp16":
-            for units in ("ne", "all", "gpu"):
-                yield (f"coreml-{units}", f"{UNIT_LABEL[units]} (float16)",
-                       lambda u=units: self._coreml_engine(d, h, w, "fp16", u))
-        else:
-            yield "coreml-gpu", f"{UNIT_LABEL['gpu']} (float32)", lambda: self._coreml_engine(d, h, w, "fp32", "gpu")
+            yield "coreml-ne", f"{UNIT_LABEL['ne']} (float16)", lambda: self._coreml_engine(d, h, w, "fp16", "ne")
 
     def _coreml_engine(self, d: str, h: int, w: int, precision: str, units: str,
                        keep_fp32: frozenset = frozenset()) -> Engine:
@@ -467,11 +467,21 @@ class IRN(nn.Module):
 
     def _choose_from(self, d, x, best, cands) -> Engine:
         h, w = x.shape[-2:]
-        sample = x[: min(4, x.shape[0])].float()
-        out, best.ms = _timed(best.fn, sample)
+        dev = x.device
+        _free(dev)  # hand PyTorch's cached GPU memory back before testing
+        sample = x[: min(2 if h * w > 400_000 else 4, x.shape[0])].float()
+        try:
+            out, best.ms = _timed(best.fn, sample)
+            # full precision: what every engine is measured against
+            ref = out if self.dtype == torch.float32 else self._reference(d, sample)
+        except Exception as e:  # noqa: BLE001  (out of memory shows up at the sync)
+            if "memory" not in str(e).lower():
+                raise
+            _free(dev)
+            self.notes.append(f"IRN x{self.scale} at {w}x{h}: not enough memory to test engines, "
+                              "staying on PyTorch")
+            return best
         torch_ms = best.ms
-        # full precision: what every engine is measured against
-        ref = out if self.dtype == torch.float32 else self._reference(d, sample)
         torch_diff = float((out - ref).abs().mean())
         tried = []
         tol = ACCURACY[self.precision]
@@ -492,6 +502,9 @@ class IRN(nn.Module):
                     best = eng
             except Exception as e:  # noqa: BLE001
                 tried.append(f"{label}: couldn't run ({type(e).__name__}: {str(e).splitlines()[0][:120] if str(e) else ''})")
+            finally:
+                out = None
+                _free(dev)
         self.notes.append(f"IRN x{self.scale} {'shrink' if d == 'down' else 'enlarge'} of {w}x{h} frames runs on "
                           f"{best.label}: {best.ms:.1f} ms per frame (PyTorch {torch_ms:.1f} ms, off by "
                           f"{torch_diff * 255:.2f}/255 on average; tried "
