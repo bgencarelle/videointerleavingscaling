@@ -101,7 +101,8 @@ class HaarDownsampling(nn.Module):
         cache = self.__dict__.setdefault("_mix_cache", {})
         if key not in cache:
             c = self.channel_in
-            m = self.haar_weights.detach()[:4, 0].reshape(4, 4).double()  # [filter, 2x2 position]
+            # built on the CPU in float64 (MPS has no float64), then moved
+            m = self.haar_weights.detach()[:4, 0].reshape(4, 4).cpu().double()  # [filter, 2x2 position]
             eye = torch.eye(c, dtype=torch.float64, device=m.device)
             # forward: out[f*c + ch] = sum_k m[f, k] * in[ch*4 + k] / 4
             fwd = torch.einsum("fk,gc->fgck", m, eye).reshape(4 * c, 4 * c) / 4.0
