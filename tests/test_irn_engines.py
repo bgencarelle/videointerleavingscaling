@@ -20,7 +20,8 @@ def test_export_modules_match_the_torch_path(tmp_path):
     x = torch.rand(1, 3, 32, 48)
     assert torch.allclose(_Down(m.net)(x), m._down_raw(x), atol=1e-6)
     lr = torch.rand(1, 3, 8, 12)
-    assert torch.allclose(_Up(m.net, 4, 8, 12)(lr), m._up_raw(lr), atol=1e-6)
+    want = m._up_raw(lr)
+    assert torch.allclose(_Up(__import__("copy").deepcopy(m.net), 4, 8, 12)(lr), want, atol=1e-6)
     # traced at a fixed size (as for Core ML) they still match
     tr = torch.jit.trace(_Down(m.net).eval(), x, check_trace=False)
     assert torch.allclose(tr(x), m._down_raw(x), atol=1e-6)
@@ -77,3 +78,14 @@ def test_converts_for_core_ml(tmp_path):
         lr = torch.rand(2, 3, 12, 16)
         got = CoreMLRunner(pkg, "all", "fp16")(lr)
         assert float((got - m._up_raw(lr)).abs().mean()) < 2 / 255
+
+
+def test_reference_is_full_precision(tmp_path):
+    _fake_irn_weights(tmp_path, 2)
+    mm = ModelManager(tmp_path)
+    full = mm.get_irn("irn-x2", torch.device("cpu"))
+    half = mm.get_irn("irn-x2", torch.device("cpu"), "fp16")
+    x = torch.rand(2, 3, 16, 24)
+    if half.dtype == torch.float16:
+        assert torch.allclose(half._reference("down", x), full._down_raw(x), atol=1e-6)
+    assert torch.allclose(half._reference("up", x), full._up_raw(x), atol=1e-6)

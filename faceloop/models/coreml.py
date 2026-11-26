@@ -25,7 +25,7 @@ import torch
 
 UNITS = {"ne": "CPU_AND_NE", "all": "ALL", "gpu": "CPU_AND_GPU"}
 UNIT_LABEL = {"ne": "the Neural Engine", "all": "Core ML (Neural Engine + GPU)", "gpu": "Core ML on the GPU"}
-FORMAT_VERSION = 1  # bump when the converted graphs would change
+FORMAT_VERSION = 2  # bump when the converted graphs would change
 
 _lock = threading.Lock()  # one conversion at a time
 

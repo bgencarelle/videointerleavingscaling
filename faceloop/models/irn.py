@@ -65,6 +65,10 @@ class InvBlockExp(nn.Module):
         self.F = DenseBlock(self.split_len2, self.split_len1)
         self.G = DenseBlock(self.split_len1, self.split_len2)
         self.H = DenseBlock(self.split_len1, self.split_len2)
+        # For Core ML: multiply by exp(-s) instead of dividing by exp(s). Same
+        # value; the Neural Engine divides with a rough reciprocal, which
+        # through 8 blocks put enlarging off by ~2/255.
+        self.mul_inverse = False
 
     def forward(self, x, rev=False):
         x1, x2 = x.narrow(1, 0, self.split_len1), x.narrow(1, self.split_len1, self.split_len2)
@@ -74,7 +78,10 @@ class InvBlockExp(nn.Module):
             y2 = x2.mul(torch.exp(s)) + self.G(y1)
         else:
             s = self.clamp * (torch.sigmoid(self.H(x1)) * 2 - 1)
-            y2 = (x2 - self.G(x1)).div(torch.exp(s))
+            if self.mul_inverse:
+                y2 = (x2 - self.G(x1)) * torch.exp(-s)
+            else:
+                y2 = (x2 - self.G(x1)).div(torch.exp(s))
             y1 = x1 - self.F(y2)
         return torch.cat((y1, y2), 1)
 
@@ -161,6 +168,9 @@ class _Up(nn.Module):
     def __init__(self, net, scale, h, w):
         super().__init__()
         self.net = net
+        for m in net.modules():
+            if isinstance(m, InvBlockExp):
+                m.mul_inverse = True
         self.register_buffer("z", torch.zeros(1, 3 * (scale * scale - 1), h, w))
 
     def forward(self, x):
@@ -250,6 +260,7 @@ class IRN(nn.Module):
         test frame against full precision (shrink then enlarge); else stays fp32."""
         x = torch.rand(1, 3, 64, 64, device=device)
         ref = self._up_raw(self._down_raw(x))
+        self.__dict__["_ref_net"] = copy.deepcopy(self.net)  # full-precision weights, for checking engines
         self.net.half()
         self.dtype = torch.float16
         try:
@@ -322,7 +333,7 @@ class IRN(nn.Module):
         if dev.type == "cpu" or unavailable_reason() is not None:
             return
         if self.precision == "fp16":
-            for units in ("ne", "all"):
+            for units in ("ne", "all", "gpu"):
                 yield (f"coreml-{units}", f"{UNIT_LABEL[units]} (float16)",
                        lambda u=units: self._coreml_engine(d, h, w, "fp16", u))
         else:
@@ -361,6 +372,18 @@ class IRN(nn.Module):
             fn = run
         return Engine(f"coreml-{units}", "", fn)
 
+    @torch.no_grad()
+    def _reference(self, d: str, sample: torch.Tensor) -> torch.Tensor:
+        """Full-precision PyTorch result, one frame at a time (to stay small)."""
+        net = self.net
+        if self.dtype != torch.float32:
+            net = self.__dict__["_ref_net"]
+        raw = self._down_raw if d == "down" else self._up_raw
+        out = torch.cat([raw(sample[i:i + 1], net) for i in range(sample.shape[0])], 0)
+        if self.dtype != torch.float32:
+            _free(sample.device)
+        return out.float()
+
     def _choose(self, d: str, x: torch.Tensor) -> Engine:
         """Try every engine on a few of these frames; keep the fastest that
         matches PyTorch's result."""
@@ -378,8 +401,11 @@ class IRN(nn.Module):
     def _choose_from(self, d, x, best, cands) -> Engine:
         h, w = x.shape[-2:]
         sample = x[: min(4, x.shape[0])].float()
-        ref, best.ms = _timed(best.fn, sample)
+        out, best.ms = _timed(best.fn, sample)
         torch_ms = best.ms
+        # full precision: what every engine is measured against
+        ref = out if self.dtype == torch.float32 else self._reference(d, sample)
+        torch_diff = float((out - ref).abs().mean())
         tried = []
         tol = ACCURACY[self.precision]
         for name, label, build in cands:
@@ -400,7 +426,8 @@ class IRN(nn.Module):
             except Exception as e:  # noqa: BLE001
                 tried.append(f"{label}: couldn't run ({type(e).__name__}: {str(e).splitlines()[0][:120] if str(e) else ''})")
         self.notes.append(f"IRN x{self.scale} {'shrink' if d == 'down' else 'enlarge'} of {w}x{h} frames runs on "
-                          f"{best.label}: {best.ms:.1f} ms per frame (PyTorch {torch_ms:.1f} ms; tried "
+                          f"{best.label}: {best.ms:.1f} ms per frame (PyTorch {torch_ms:.1f} ms, off by "
+                          f"{torch_diff * 255:.2f}/255 on average; tried "
                           + "; ".join(tried) + ")")
         return best
 
