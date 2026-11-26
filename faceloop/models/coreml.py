@@ -94,17 +94,43 @@ class CoreMLRunner:
     through one at a time as a Core ML batch prediction."""
 
     def __init__(self, path: Path, units: str, precision: str):
+        path = Path(path)
+        compiled = path.with_suffix(".mlmodelc")  # compiled once, kept next to the package
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             import coremltools as ct
-            self.model = ct.models.MLModel(str(path), compute_units=getattr(ct.ComputeUnit, UNITS[units]))
+            cu = getattr(ct.ComputeUnit, UNITS[units])
+            self.model = None
+            if compiled.exists():
+                try:
+                    self.model = ct.models.CompiledMLModel(str(compiled), compute_units=cu)
+                except Exception:  # noqa: BLE001
+                    shutil.rmtree(compiled, ignore_errors=True)
+            if self.model is None:
+                self.model = ct.models.MLModel(str(path), compute_units=cu)
+                try:
+                    src = self.model.get_compiled_model_path()
+                    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=path.parent)) / compiled.name
+                    shutil.copytree(src, tmp)
+                    os.replace(tmp, compiled)
+                    shutil.rmtree(tmp.parent, ignore_errors=True)
+                except Exception:  # noqa: BLE001
+                    pass  # only saves compiling next time
         self.np_dtype = np.float16 if precision == "fp16" else np.float32
         self.units = units
+        self._batch = True
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         dev = x.device
         arr = x.detach().to("cpu", torch.float32).numpy().astype(self.np_dtype)
         feeds = [{"x": np.ascontiguousarray(a[None])} for a in arr]
-        outs = self.model.predict(feeds) if len(feeds) > 1 else [self.model.predict(feeds[0])]
+        outs = None
+        if len(feeds) > 1 and self._batch:
+            try:
+                outs = self.model.predict(feeds)
+            except Exception:  # noqa: BLE001  (a compiled model may not take a list)
+                self._batch = False
+        if outs is None:
+            outs = [self.model.predict(f) for f in feeds]
         y = np.concatenate([np.asarray(o["y"]) for o in outs], 0).astype(np.float32)
         return torch.from_numpy(y).to(dev)

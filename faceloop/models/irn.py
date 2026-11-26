@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -346,8 +348,7 @@ class IRN(nn.Module):
                        keep_fp32: frozenset = frozenset()) -> Engine:
         from .coreml import FORMAT_VERSION, CoreMLRunner, convert
         s = self.scale
-        st = self.path.stat()
-        tag = hashlib.sha256(f"{self.path.name}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()[:8]
+        tag = self._weights_tag()
         if d == "down":
             ph, pw = h + (-h) % s, w + (-w) % s
             module, shape = _Down(copy.deepcopy(self.net)), (1, 3, ph, pw)
@@ -378,19 +379,91 @@ class IRN(nn.Module):
             _free(sample.device)
         return out.float()
 
+    def _weights_tag(self) -> str:
+        st = self.path.stat()
+        return hashlib.sha256(f"{self.path.name}:{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()[:8]
+
+    # ------------------------------------------------ remembered choices
+    # Which engine won is saved per weights file, direction, frame size,
+    # precision and software versions, so later runs (a new bench, a GUI
+    # restart) skip the tests: they build only the winner and check it on one
+    # frame. Delete weights/irn/coreml/engines.json to make IRN test again.
+    def _choices_path(self) -> Path:
+        return self.path.parent / "coreml" / "engines.json"
+
+    def _choice_key(self, d: str, h: int, w: int) -> str:
+        try:
+            import coremltools
+            ctv = coremltools.__version__
+        except Exception:  # noqa: BLE001
+            ctv = "none"
+        from .coreml import FORMAT_VERSION
+        return (f"{self.path.name}:{self._weights_tag()}|{d}|{w}x{h}|{self.precision}|{self.dtype}|"
+                f"{self._device().type}|torch {torch.__version__}|coremltools {ctv}|v{FORMAT_VERSION}")
+
+    def _load_choices(self) -> dict:
+        try:
+            return json.loads(self._choices_path().read_text())
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _save_choice(self, key: str, name: str) -> None:
+        p = self._choices_path()
+        try:
+            data = self._load_choices()
+            data[key] = name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
+            os.replace(tmp, p)
+        except OSError:
+            pass  # only a shortcut for next time
+
     def _choose(self, d: str, x: torch.Tensor) -> Engine:
-        """Try every engine on a few of these frames; keep the fastest that
-        matches PyTorch's result."""
+        """Use the engine chosen on an earlier run if there is one (after a
+        one-frame check); otherwise try every engine on a few of these frames
+        and keep the fastest that's close enough to PyTorch's result."""
         h, w = x.shape[-2:]
         best = self._torch_engine(d)
         cands = list(self._candidates(d, h, w))
         if not cands:
             return best
         t_setup = time.time()
+        key = self._choice_key(d, h, w)
         try:
-            return self._choose_from(d, x, best, cands)
+            again = self._reuse(d, x, best, cands, self._load_choices().get(key))
+            if again is not None:
+                return again
+            eng = self._choose_from(d, x, best, cands)
+            self._save_choice(key, eng.name)
+            return eng
         finally:
             SETUP["seconds"] += time.time() - t_setup
+
+    def _reuse(self, d, x, torch_eng, cands, name) -> Engine | None:
+        if name is None:
+            return None
+        h, w = x.shape[-2:]
+        what = f"IRN x{self.scale} {'shrink' if d == 'down' else 'enlarge'} of {w}x{h} frames"
+        if name == "torch":
+            self.notes.append(f"{what} runs on {torch_eng.label} (chosen on an earlier run)")
+            return torch_eng
+        for cname, label, build in cands:
+            if cname != name:
+                continue
+            try:
+                eng = build()
+                eng.label = label
+                one = x[:1].float()
+                got, want = eng.fn(one).float(), torch_eng.fn(one).float()
+                diff = float((got - want).abs().mean()) if got.shape == want.shape else float("inf")
+                if torch.isfinite(got).all() and diff <= ACCURACY[self.precision] + 1 / 255:
+                    self.notes.append(f"{what} runs on {label} (chosen on an earlier run; "
+                                      f"off by {diff * 255:.2f}/255 from PyTorch on a check frame)")
+                    return eng
+            except Exception:  # noqa: BLE001
+                pass
+        return None  # not usable any more: test again
 
     def _choose_from(self, d, x, best, cands) -> Engine:
         h, w = x.shape[-2:]

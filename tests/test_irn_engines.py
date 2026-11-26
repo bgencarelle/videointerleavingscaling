@@ -59,6 +59,19 @@ def test_fastest_matching_engine_wins(tmp_path, monkeypatch):
     m.down(x)  # chosen once per size, then reused
     assert len(calls) == n + 1 and len(m.notes) == 1
 
+    # a new process (new manager) reuses the saved choice without testing again
+    assert (tmp_path / "irn" / "coreml" / "engines.json").exists()
+    m2 = ModelManager(tmp_path).get_irn("irn-x2", torch.device("cpu"))
+    timed = []
+    monkeypatch.setattr(IRN, "_choose_from", lambda *a: timed.append(1))
+    assert torch.allclose(m2.down(x), y, atol=1e-6)
+    assert not timed and m2.engines[("down", 24, 32)].name == "fast"
+    assert "chosen on an earlier run" in m2.notes[-1]
+    # a different size is tested from scratch
+    with pytest.raises(AttributeError):
+        m2.down(torch.rand(1, 3, 16, 16))  # (the stub above returns None)
+    assert timed
+
 
 def test_no_candidates_no_tuning(tmp_path):
     m = _irn(tmp_path)
