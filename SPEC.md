@@ -18,12 +18,21 @@ contact sheets, GUI.
 - **Pass shape:**
   1. **lead-in:** steps run once, taking the source frames down to the
      *loop size* (the size after the lead-in).
-  2. **cycles:** A, B, C, ... alternate in `pattern` order. Every cycle starts
-     and ends at the loop size: if its last step doesn't end there, an area
-     resize lands it. `iterations` counts single cycles.
+  2. **cycles:** A, B, C, ... alternate in `pattern` order. `iterations`
+     counts single cycles.
+     - The first cycle starts at the loop size. After that, each cycle ends
+       wherever its last step ends, and the next cycle's first step takes it
+       from there; there's no automatic resize in between.
+     - The sizes must settle into a repeating pattern, checked before a run
+       and shown in the GUI. A pattern whose frames keep growing (say ×2 with
+       nothing resizing back), or that gets bigger than 16× the source's
+       pixels, is refused.
+     - (Until version 5 every cycle was landed back on the loop size with
+       area. That threw away the last step's detail and repeated the resize
+       the next cycle does anyway.)
   3. **finish:** at each save point (every `save_every` cycles and after the
-     last), a *copy* is taken back to the source size and saved. The loop
-     carries on from the small frames, untouched.
+     last), a *copy* is taken from wherever the cycles left it back to the
+     source size and saved. The loop carries on, untouched.
 - **Steps:** each step is a target width plus a method. The height follows
   the source aspect, rounded to the nearest whole pixel. Width is pixels,
   `"source"`, or `"loop"` (`"loop"` isn't allowed in the lead-in, which

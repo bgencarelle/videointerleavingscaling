@@ -217,12 +217,12 @@ def test_run_pass_end_to_end_and_resume(tmp_path):
     assert again.skipped_frames == 8
 
 
-def test_cycle_lands_on_source_size():
+def test_cycle_ends_where_its_last_step_ends():
     ctx = StepContext(src=Size(64, 48), transfer=Transfer(), light="linear", rounding="srgb",
                       resizer=KernelResizer(), models=None)
     x = torch.rand(2, 3, 48, 64)
     y = run_cycle(x, [{"op": "resize", "method": "bicubic", "width": 20}], ctx)
-    assert y.shape == x.shape
+    assert y.shape == (2, 3, 15, 20)  # no automatic resize back
     assert torch.equal(y, torch.round(y * 255) / 255)
 
 
@@ -259,22 +259,40 @@ def test_linear_light_differs_from_encoded(tmp_path):
 
 
 # ------------------------------------------------------------------ new pass shape
-def test_cycles_run_at_loop_size_and_saves_are_full_size(tmp_path):
+def test_cycles_chain_and_saves_are_full_size(tmp_path):
     src, _ = _make_source(tmp_path)
     sizes = []
 
     def on_contact(cycle, step_i, names, imgs):
         sizes.append((cycle, step_i, imgs.shape[1:3]))
 
-    r = _recipe(iterations=2, save_every=1)
+    r = _recipe(iterations=3, save_every=1)
     res = run_pass(r, src, tmp_path / "out", device=torch.device("cpu"), batch_size=8, on_contact=on_contact)
-    # cycle A: area 16 -> 12x16, lanczos back to the loop size 32x24
-    assert ("A", 0, (12, 16)) in sizes and ("A", 1, (24, 32)) in sizes
-    # cycle B: nearest 8, then the automatic landing back on the loop size
-    assert ("B", 0, (6, 8)) in sizes and ("B", 1, (24, 32)) in sizes
-    for c in ("c0001", "c0002"):
+    # last A (cycle 3) starts where B ended (8x6): area 16 -> 16x12, lanczos to the loop size
+    assert ("A", -1, (6, 8)) in sizes and ("A", 0, (12, 16)) in sizes and ("A", 1, (24, 32)) in sizes
+    # B (cycle 2) starts where A ended: the loop size
+    assert ("B", -1, (24, 32)) in sizes
+    # B: nearest 8 -> 8x6, and the cycle ends there (no landing column)
+    assert ("B", 0, (6, 8)) in sizes and not any(c == "B" and i == 1 for c, i, _ in sizes)
+    for c in ("c0001", "c0002", "c0003"):  # c0002 is finished straight from 8x6
         im = Image.open(next((res.folder / c).glob("*.webp")))
         assert im.size == (64, 48)
+
+
+def test_pattern_must_settle():
+    from faceloop.engine import check_pattern, simulate_pattern
+    grows = _recipe(cycles={"A": [{"op": "xbr", "scale": 2}]}, pattern=["A"])
+    with pytest.raises(RecipeError):
+        check_pattern(grows, Size(64, 48))
+    ok = _recipe(cycles={"A": [{"op": "resize", "method": "nearest", "width": 8}, {"op": "xbr", "scale": 4}],
+                         "B": [{"op": "resize", "method": "area", "width": "loop"}]}, pattern=["A", "B"])
+    check_pattern(ok, Size(64, 48))
+    sim = simulate_pattern(ok, Size(64, 48))
+    assert sim["starts"]["B"] == Size(32, 24) and sim["starts"]["A"] == Size(32, 24)
+    one = _recipe(cycles={"A": [{"op": "resize", "method": "nearest", "width": 8}, {"op": "xbr", "scale": 2}]},
+                  pattern=["A"])
+    check_pattern(one, Size(64, 48))  # starts with its own resize: settles at 16x12
+    assert simulate_pattern(one, Size(64, 48))["end"] == Size(16, 12)
 
 
 def test_lead_in_cannot_use_loop_width():

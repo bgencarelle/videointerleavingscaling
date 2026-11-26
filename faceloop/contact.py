@@ -69,7 +69,7 @@ class ContactRecorder:
 
     def labels(self, cycle: str) -> list[str]:
         steps = self.recipe.cycles[cycle]
-        return ["cycle start"] + [step_label(s) for s in steps] + ["land on loop size"]
+        return ["cycle start"] + [step_label(s) for s in steps]
 
     def build(self) -> list[Path]:
         out = []

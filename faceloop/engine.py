@@ -133,8 +133,9 @@ def run_steps(x: torch.Tensor, steps: list[dict], ctx: StepContext, land: Size |
 
 def run_cycle(x: torch.Tensor, steps: list[dict], ctx: StepContext,
               capture: Callable[[int, torch.Tensor], None] | None = None) -> torch.Tensor:
-    """A cycle starts and ends at the loop size (the source size if unset)."""
-    return run_steps(x, steps, ctx, ctx.loop or ctx.src, capture)
+    """A cycle ends wherever its last step ends; the next cycle's first step
+    takes it from there (no automatic resize in between)."""
+    return run_steps(x, steps, ctx, None, capture)
 
 
 def run_lead_in(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
@@ -260,6 +261,75 @@ class PassResult:
     stopped: bool = False
 
 
+def _scale_lookup(models):
+    def scale_of(st):
+        if st.get("op") == "xbr":
+            return int(st["scale"])
+        info = getattr(models, "catalog", {}).get(st.get("model")) if models is not None else None
+        return info.scale if info and info.scale else None
+    return scale_of
+
+
+def step_size(st: dict, cur: Size, src: Size, loop: Size | None, scale_of) -> tuple[Size, list | None, bool]:
+    """(size after the step, raw model/xBR output size or None, scale known?)"""
+    w = st.get("width")
+    tgt = src if w == "source" else (loop if w == "loop" else (size_for(int(w), src) if isinstance(w, int) else None))
+    op = st.get("op")
+    if op in ("model", "xbr"):
+        k = scale_of(st)
+        if not k:
+            return (tgt or cur), None, False
+        raw = [cur.width * k, cur.height * k]
+        return (tgt or Size(*raw)), raw, True
+    if op == "chroma":
+        return cur, None, True
+    return (tgt or cur), None, True
+
+
+MAX_GROWTH = 16  # a pattern may not make frames bigger than 16x the source's pixels
+
+
+def simulate_pattern(recipe: Recipe, src: Size, models=None, rounds: int = 3) -> dict:
+    """Follow the frame size through the lead-in and a few rounds of the
+    pattern. Returns the loop size, where each cycle starts once things have
+    settled, the biggest size seen, and whether the sizes settle at all."""
+    scale_of = _scale_lookup(models)
+    known = True
+    cur = src
+    biggest = src.width * src.height
+    for st in recipe.lead_in:
+        cur, raw, ok = step_size(st, cur, src, None, scale_of)
+        known &= ok
+        biggest = max(biggest, cur.width * cur.height, raw[0] * raw[1] if raw else 0)
+    loop = cur
+    ends, starts = [], {}
+    cyc_big = loop.width * loop.height  # biggest size inside the cycles only
+    for r in range(rounds):
+        for k in recipe.pattern:
+            if r == rounds - 1 and k not in starts:
+                starts[k] = cur
+            for st in recipe.cycles[k]:
+                cur, raw, ok = step_size(st, cur, src, loop, scale_of)
+                known &= ok
+                cyc_big = max(cyc_big, cur.width * cur.height, raw[0] * raw[1] if raw else 0)
+        ends.append(cur)
+    biggest = max(biggest, cyc_big)
+    stable = (not known) or ends[-1] == ends[-2]
+    too_big = biggest > MAX_GROWTH * src.width * src.height
+    return {"loop": loop, "starts": starts, "end": cur, "biggest": biggest, "cycle_biggest": cyc_big,
+            "stable": stable, "known": known, "too_big": too_big}
+
+
+def check_pattern(recipe: Recipe, src: Size, models=None) -> None:
+    sim = simulate_pattern(recipe, src, models)
+    if not sim["stable"]:
+        raise RecipeError("the frames keep changing size from one round of cycles to the next "
+                          "(e.g. a x2 step with nothing that resizes back): give a cycle a step "
+                          "that resizes to a fixed size, like the loop size")
+    if sim["too_big"]:
+        raise RecipeError(f"frames would get bigger than {MAX_GROWTH}x the source's pixels inside the loop")
+
+
 def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: int) -> tuple[Size, int]:
     for s in steps:
         w = s.get("width")
@@ -284,41 +354,22 @@ def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: in
 def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
     """Every step's output size, for showing in the GUI before a run.
 
-    Returns {"loop": Size, "lead_in": rows, "cycles": {name: rows}, "finish": rows};
-    a row is {"width", "height", "error", "note"}. `error` is how far the height
-    is from the exact aspect, in pixels."""
+    Returns {"loop", "lead_in", "cycles", "cycle_starts", "finish", "stable"}.
+    Cycles are shown from where they start once the pattern has settled (the
+    first cycle of a run starts from the loop size instead). A row is
+    {"width", "height", "from", "raw", "scale", "error", "note"}."""
     from .sizes import aspect_error
-
-    def scale_of(st):
-        if st.get("op") == "xbr":
-            return int(st["scale"])
-        info = getattr(models, "catalog", {}).get(st.get("model")) if models is not None else None
-        return (info.scale if info and info.scale else None)
+    scale_of = _scale_lookup(models)
 
     def run(steps, cur, loop, land, land_label):
         rows = []
         for st in steps:
-            note = ""
-            raw = None
             before = cur
-            w = st.get("width")
-            tgt = src if w == "source" else (loop if w == "loop" else (size_for(int(w), src) if isinstance(w, int) else None))
-            op = st.get("op")
-            if op in ("model", "xbr"):
-                k = scale_of(st)
-                if k:
-                    raw = [cur.width * k, cur.height * k]
-                    cur = tgt or Size(cur.width * k, cur.height * k)
-                else:
-                    note = "scale unknown until loaded"
-                    cur = tgt or cur
-            elif op == "chroma":
-                pass
-            elif tgt is not None:
-                cur = tgt
+            cur, raw, ok = step_size(st, cur, src, loop, scale_of)
             rows.append({"width": cur.width, "height": cur.height, "from": [before.width, before.height],
-                         "raw": raw, "scale": scale_of(st) if op in ("model", "xbr") else None,
-                         "error": round(aspect_error(cur, src), 3), "note": note})
+                         "raw": raw, "scale": scale_of(st) if st.get("op") in ("model", "xbr") else None,
+                         "error": round(aspect_error(cur, src), 3),
+                         "note": "" if ok else "scale unknown until loaded"})
         if land is not None and cur != land:
             rows.append({"width": land.width, "height": land.height, "from": [cur.width, cur.height],
                          "raw": None, "scale": None, "error": round(aspect_error(land, src), 3),
@@ -326,28 +377,34 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
             cur = land
         return rows, cur
 
-    lead, loop = run(recipe.lead_in, src, None, None, "")
-    cycles = {k: run(recipe.cycles[k], loop, loop, loop, "area lands on the loop size")[0]
+    sim = simulate_pattern(recipe, src, models)
+    loop = sim["loop"]
+    lead, _ = run(recipe.lead_in, src, None, None, "")
+    cycles = {k: run(recipe.cycles[k], sim["starts"].get(k, loop), loop, None, "")[0]
               for k in dict.fromkeys(recipe.pattern) if k in recipe.cycles}
-    fin, _ = run(recipe.finish, loop, loop, src, "area lands on the source size")
-    return {"loop": loop, "lead_in": lead, "cycles": cycles, "finish": fin}
+    fin, _ = run(recipe.finish, sim["end"], loop, src, "area lands on the source size")
+    return {"loop": loop, "lead_in": lead, "cycles": cycles, "finish": fin,
+            "cycle_starts": {k: [v.width, v.height] for k, v in sim["starts"].items()},
+            "stable": sim["stable"], "too_big": sim["too_big"]}
 
 
 MAX_BATCH = 256
 
 
-def batch_sizes(src: Size, recipe: Recipe, ram: int | None = None) -> tuple[int, int]:
+def batch_sizes(src: Size, recipe: Recipe, ram: int | None = None, models=None) -> tuple[int, int]:
     """(frames per batch, frames per full-size chunk).
 
-    A batch lives on the GPU at the loop size through all its cycles, so it
-    can be big when the loop size is small. The lead-in and the finish work at
+    A batch lives on the GPU through all its cycles at the sizes the cycles
+    use, so it can be big when those are small. The lead-in and the finish work at
     full size, so they run a few frames (a chunk) at a time."""
     ram = ram or total_ram_bytes()
-    loop, lead_big = _sim(recipe.lead_in, src, src, None, src.width * src.height)
-    cyc_big = loop.width * loop.height
-    for k in set(recipe.pattern):
-        _, cyc_big = _sim(recipe.cycles[k], loop, src, loop, cyc_big)
-    _, fin_big = _sim(recipe.finish, loop, src, loop, src.width * src.height)
+    _, lead_big = _sim(recipe.lead_in, src, src, None, src.width * src.height)
+    sim = simulate_pattern(recipe, src, models)
+    loop = sim["loop"]
+    cyc_big = max(sim["cycle_biggest"] if sim["known"] else 0, loop.width * loop.height)
+    for k in set(recipe.pattern):  # unknown model scales: assume up to x4
+        _, cyc_big = _sim(recipe.cycles[k], sim["starts"].get(k, loop), src, loop, cyc_big)
+    _, fin_big = _sim(recipe.finish, sim["end"], src, loop, src.width * src.height)
     f32 = 3 * 4 * 4  # float32 RGB, a few temporaries
     chunk = int(max(1, min(64, ram * 0.15 // (max(lead_big, fin_big) * f32))))
     by_gpu = ram * 0.20 // (cyc_big * f32)
@@ -356,8 +413,8 @@ def batch_sizes(src: Size, recipe: Recipe, ram: int | None = None) -> tuple[int,
     return batch, chunk
 
 
-def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int:
-    return batch_sizes(src, recipe, ram)[0]
+def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None, models=None) -> int:
+    return batch_sizes(src, recipe, ram, models)[0]
 
 
 def source_identity(source: Path) -> dict:
@@ -467,7 +524,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     if skipped:
         _log(f"resuming: {skipped} frames already done")
 
-    bs, chunk = batch_sizes(src, recipe)
+    check_pattern(recipe, src, models)
+    bs, chunk = batch_sizes(src, recipe, models=models)
     bs = batch_size or bs
     chunk = min(chunk, bs)
     save_pts = set(recipe.save_points())

@@ -305,7 +305,13 @@ class App:
                 info = self.source_info(src)
                 p = plan_sizes(r, Size(info["width"], info["height"]), self.models)
                 out["sizes"] = {"loop": [p["loop"].width, p["loop"].height], "lead_in": p["lead_in"],
-                                "cycles": p["cycles"], "finish": p["finish"]}
+                                "cycles": p["cycles"], "finish": p["finish"], "cycle_starts": p["cycle_starts"]}
+                try:
+                    from .engine import check_pattern
+                    check_pattern(r, Size(info["width"], info["height"]), self.models)
+                except RecipeError as e:
+                    out["ok"] = False
+                    out["errors"].append(str(e))
                 out["source"] = info
             except ValueError as e:
                 out["errors"].append(f"source: {e}")

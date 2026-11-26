@@ -85,10 +85,14 @@ def test_page_and_preview(server):
     a = p["sizes"]["cycles"]["A"]
     assert [(r["width"], r["height"]) for r in a] == [(12, 16), (24, 32)]
     b = p["sizes"]["cycles"]["B"]
-    assert [(r["width"], r["height"]) for r in b] == [(24, 32), (8, 11), (24, 32)]  # last row = landing
+    assert [(r["width"], r["height"]) for r in b] == [(24, 32), (8, 11)]  # no landing between cycles
+    assert p["sizes"]["cycle_starts"] == {"A": [8, 11], "B": [24, 32]}  # A starts where B ended
     assert b[1]["error"] > 0  # 8 wide can't keep 3:4 exactly
     bad = call("/api/preview", {"recipe": {**RECIPE, "pattern": ["C"]}, "source": str(src)})
     assert not bad["ok"] and "C" in bad["errors"][0]
+    grows = call("/api/preview", {"recipe": {**RECIPE, "cycles": {"A": [{"op": "xbr", "scale": 2}]}, "pattern": ["A"]},
+                                  "source": str(src)})
+    assert not grows["ok"] and any("size" in e for e in grows["errors"])
 
 
 def test_presets(server):

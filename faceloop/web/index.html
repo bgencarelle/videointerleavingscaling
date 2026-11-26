@@ -111,7 +111,7 @@
    </section>
 
    <section>
-    <h2>Cycles <small class="muted">each starts and ends at the loop size</small></h2>
+    <h2>Cycles <small class="muted">each one starts where the previous one ended (the first one at the loop size)</small></h2>
     <div id="cycles"></div>
     <div class="row"><button class="small" id="addCycle">+ cycle</button></div>
     <div class="row"><label class="f">Pattern</label>
@@ -135,7 +135,7 @@
    </section>
 
    <section>
-    <h2>Finish <small class="muted">a copy back to full size at each save; area lands it exactly</small></h2>
+    <h2>Finish <small class="muted">a copy, from wherever the cycles left it, back to full size at each save; area lands it exactly</small></h2>
     <div class="steps" id="finish"></div>
     <div class="row"><button class="small" data-add="finish">+ step</button></div>
     <div class="row"><label class="f">Saved as</label>
@@ -314,7 +314,7 @@ function renderCycles() {
   const box = $("#cycles"); box.innerHTML = "";
   for (const name of Object.keys(state.cycles)) {
     const d = document.createElement("div"); d.className = "cycle";
-    d.innerHTML = `<div class="head"><b>${esc(name)}</b><span class="muted">cycle</span>
+    d.innerHTML = `<div class="head"><b>${esc(name)}</b><span class="muted">cycle</span><span class="muted" data-start></span>
       <button class="small" data-addc>+ step</button><span style="flex:1"></span>
       <button class="small" data-delc ${Object.keys(state.cycles).length < 2 ? "disabled" : ""}>remove cycle</button></div>
       <div class="steps"></div>`;
@@ -399,6 +399,8 @@ async function doPreview() {
   document.querySelectorAll("#cycles .cycle").forEach((d, k) => {
     const name = Object.keys(state.cycles)[k];
     putSizes($(".steps", d), sz && sz.cycles[name], state.cycles[name]);
+    const st = sz && sz.cycle_starts && sz.cycle_starts[name];
+    $("[data-start]", d).textContent = st ? `· starts at ${st[0]}×${st[1]}` : "";
   });
   putSizes($("#finish"), sz && sz.finish, state.finish);
   $("#estimate").disabled = !(p.ok && src && $("#out").value.trim());

@@ -64,7 +64,7 @@ def test_model_step_lands_on_its_width():
                   {"op": "model", "model": "fake-x2", "width": 40},
                   {"op": "model", "model": "fake-x2"}],
               ctx, capture=lambda i, t: seen.append(tuple(t.shape[-2:])))
-    assert seen == [(12, 16), (30, 40), (60, 80), (48, 64)]
+    assert seen == [(12, 16), (30, 40), (60, 80)]  # the cycle ends where its last step ends
 
 
 def test_runner_falls_back_to_smaller_batches_and_tiles():

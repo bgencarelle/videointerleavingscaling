@@ -152,7 +152,7 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
         raise SystemExit(f"no frames in {source}")
     w, h, icc = probe(allf[0])
     src = Size(w, h)
-    bs, chunk = batch_sizes(src, recipe)
+    bs, chunk = batch_sizes(src, recipe, models=models)
     n_max = max(1, min(frames or 64, bs, len(allf)))
     n_warm = min(4, n_max)
     pick_all = [allf[int(i * (len(allf) - 1) / max(1, n_max - 1))] for i in range(n_max)] if n_max > 1 else allf[:1]
@@ -230,9 +230,6 @@ def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = 
             for st in recipe.cycles[k]:
                 check()
                 xx = timed((f"cycle {k}", step_label(st)), lambda a, st=st: apply_step(a, st, ctx), xx)
-            if (xx.shape[-1], xx.shape[-2]) != (ctx.loop.width, ctx.loop.height):
-                xx = timed((f"cycle {k}", "land on loop size"),
-                           lambda a: quantize(_kernel(a, ctx.loop, "area", ctx), ctx.rounding, ctx.transfer), xx)
         cyc_total = sum(st["ms"] for st in steps) or 1.0
         for st in steps:
             st["share"] = st["ms"] / cyc_total

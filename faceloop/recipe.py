@@ -4,9 +4,11 @@ Shape of a pass
 ---------------
 lead_in   steps run once, taking the source frames down to the *loop size*
           (the size after the lead-in).
-cycles    A, B, C ... alternate in `pattern` order. Every cycle starts and
-          ends at the loop size: if a cycle's last step doesn't end there,
-          an area resize lands it. `iterations` counts single cycles.
+cycles    A, B, C ... alternate in `pattern` order. The first cycle starts
+          at the loop size; each cycle ends wherever its last step ends and
+          the next one takes it from there (no automatic resize in between).
+          The sizes must settle into a repeating pattern (checked before a
+          run). `iterations` counts single cycles.
 finish    takes a *copy* of the frames back to the source size at every save
           point (every `save_every` cycles and after the last). The loop
           itself carries on from the small frames, untouched.
@@ -40,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bump when pixel output for the same recipe would change.
-ENGINE_PIXELS_VERSION = 4
+ENGINE_PIXELS_VERSION = 5
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
                 "bicubic": "bic", "lanczos": "lanc"}

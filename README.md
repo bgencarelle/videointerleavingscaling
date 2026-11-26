@@ -88,8 +88,9 @@ frames.
 A recipe is a JSON file with three parts:
 
 - **lead-in:** runs once, from the source down to the loop size.
-- **cycles:** alternate in `pattern` order at the loop size. `iterations`
-  counts single cycles.
+- **cycles:** alternate in `pattern` order, starting at the loop size. Each
+  cycle continues from wherever the previous one ended. `iterations` counts
+  single cycles.
 - **finish:** at every save point, a copy is taken back to full size.
 
 ```json
@@ -129,7 +130,9 @@ A recipe is a JSON file with three parts:
 - `width`: pixels, `"source"`, or `"loop"`. Height follows the source aspect;
   for 810x1080 frames, multiples of 3 keep it exact.
 - A model step runs the model, then area-resizes to `width`.
-- A cycle that doesn't end at the loop size is landed there with area.
+- There's no automatic resize between cycles: give a cycle a step with a
+  fixed size (e.g. "the loop size") so the sizes repeat. faceloop refuses
+  patterns that would keep growing.
 - `finish`: a list of steps back to full size (e.g. one bicubic resize).
   Area lands them exactly on the source size; `[]` means just area.
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
