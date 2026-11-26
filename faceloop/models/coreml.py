@@ -23,6 +23,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# No conversion progress bars in the log. tqdm reads this when it's imported,
+# so it has to be set before coremltools loads.
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 UNITS = {"ne": "CPU_AND_NE", "all": "ALL", "gpu": "CPU_AND_GPU"}
 UNIT_LABEL = {"ne": "the Neural Engine", "all": "Core ML (Neural Engine + GPU)", "gpu": "Core ML on the GPU"}
 FORMAT_VERSION = 2  # bump when the converted graphs would change
@@ -56,7 +60,6 @@ def convert(module: torch.nn.Module, shape: tuple[int, ...], path: Path, precisi
     with _lock:
         if path.exists():
             return path
-        os.environ.setdefault("TQDM_DISABLE", "1")  # no progress bars in the log
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             import coremltools as ct

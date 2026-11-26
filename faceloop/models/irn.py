@@ -18,7 +18,7 @@ Frames are replicate-padded to a multiple of the scale and cropped after.
 Engines: the first time a pass shrinks or enlarges frames of a given size,
 IRN tries the ways it can run on this Mac on a few of those frames, checks
 each against PyTorch's own result, times them, and keeps the fastest:
-PyTorch on the GPU (as stored, or channels-last), and on macOS with
+PyTorch on the GPU, and on macOS with
 coremltools, the network converted to Core ML for the Neural Engine
 (half precision only; the Neural Engine has no float32) or for Core ML's
 GPU path. Converted networks are kept in weights/irn/coreml/.
@@ -332,8 +332,6 @@ class IRN(nn.Module):
     def _candidates(self, d: str, h: int, w: int):
         """(name, label, builder) for every other way to run this here."""
         dev = self._device()
-        if dev.type == "mps":
-            yield "torch-cl", "PyTorch on mps, channels-last", lambda: self._channels_last_engine(d)
         from .coreml import UNIT_LABEL, unavailable_reason
         if dev.type == "cpu" or unavailable_reason() is not None:
             return
@@ -343,17 +341,6 @@ class IRN(nn.Module):
                        lambda u=units: self._coreml_engine(d, h, w, "fp16", u))
         else:
             yield "coreml-gpu", f"{UNIT_LABEL['gpu']} (float32)", lambda: self._coreml_engine(d, h, w, "fp32", "gpu")
-
-    def _channels_last_engine(self, d: str) -> Engine:
-        net = self.__dict__.get("_cl_net")  # not a submodule: stays out of state_dict
-        if net is None:
-            net = self.__dict__["_cl_net"] = copy.deepcopy(self.net).to(memory_format=torch.channels_last)
-        cl = torch.channels_last
-        if d == "down":
-            return Engine("torch-cl", "", lambda x: self._safe(
-                lambda t: self._down_raw(t.contiguous(memory_format=cl), net), x, True))
-        return Engine("torch-cl", "", lambda x: self._safe(
-            lambda t: self._up_raw(t.contiguous(memory_format=cl), net), x, False))
 
     def _coreml_engine(self, d: str, h: int, w: int, precision: str, units: str,
                        keep_fp32: frozenset = frozenset()) -> Engine:
