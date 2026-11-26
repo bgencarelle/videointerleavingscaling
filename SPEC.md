@@ -47,8 +47,8 @@ loop / finish pass shape. The GUI is stage 5.
 |---|---|
 | kernels | nearest, area, bilinear, bicubic (Keys a=-0.5, like Pillow), Lanczos-3 |
 | old-school variants | `antialias: false` (shrink without prefiltering), `fixed_point: true` (phase quantised to 4 bits, weights to 6 bits, 8-bit intermediate) |
-| pixel-art upscalers | Scale2x/EPX, hq2x, xBR (stage 3) |
-| colour / analog, resize-only | colour resized separately from brightness (4:2:0, 4:1:1, YUV9), horizontal-only softening, sideways colour smear (stage 3) |
+| pixel-art upscaler | xBR x2/x3/x4: Hyllian's xBR-lv2 shader (MIT), ported exactly with its defaults (threshold 0.32, smoothness 0.30, AA blending, corner C); works on stored values like the shader. Then area to the step's width. Tested: exactly symmetric under rotation, mirroring and transposing |
+| colour resolution | like video codecs: Y'CbCr (BT.601 default, or 709; full range, 8-bit), colour averaged over blocks (4:2:2, 4:2:0, 4:1:1 = DV, 4:1:0 = YUV9) and brought back with nearest; brightness keeps full resolution; size unchanged |
 | models | see below |
 
 ### Models (all run natively on the Mac GPU)
@@ -156,7 +156,8 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 
 1. Core engine: steps, kernels, colour maths, recipe format, tests. **done**
 2. Models: ports, catalogue, downloads, drop-ins, GPU self-test, benchmark. **done**
-3. Old-school, colour and analog steps.
+3. xBR and the colour-resolution step. **done** (Analog and the other
+   pixel-art scalers were dropped: only existing algorithms.)
 4. Contact sheets; pass catalogue polish.
 5. GUI.
 6. Benchmark/estimate in the GUI, README polish.

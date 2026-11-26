@@ -97,6 +97,15 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
+    elif op == "xbr":
+        from .pixelart import xbr
+        x = xbr(x, int(step["scale"])).clamp(0, 1)
+        t = _target(step, ctx.src, cur, ctx.loop)
+        if t is not None:
+            x = _kernel(x, t, "area", ctx)
+    elif op == "chroma":
+        from .chroma import subsample
+        x = subsample(x, step.get("mode", "420"), step.get("matrix", "601"))
     else:
         raise RecipeError(f"unknown op {op!r}")
     return quantize(x, ctx.rounding, ctx.transfer)
@@ -225,9 +234,10 @@ def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: in
             tgt = size_for(w, src)
         else:
             tgt = None
-        if s.get("op") == "model":
-            biggest = max(biggest, cur.width * cur.height * 16)  # up to x4 before landing
-            cur = tgt or Size(cur.width * 4, cur.height * 4)
+        if s.get("op") in ("model", "xbr"):
+            k = int(s.get("scale", 4))  # models: assume up to x4 before landing
+            biggest = max(biggest, cur.width * cur.height * k * k)
+            cur = tgt or Size(cur.width * k, cur.height * k)
         elif tgt is not None:
             cur = tgt
         biggest = max(biggest, cur.width * cur.height)
@@ -443,4 +453,8 @@ def _describe_step(s: dict) -> str:
         return f"{s['method']}{'(' + ','.join(extra) + ')' if extra else ''}->{w}"
     if s["op"] == "model":
         return f"{s['model']}->{w if w else 'native'}"
+    if s["op"] == "xbr":
+        return f"xBR x{s['scale']}->{w if w else 'native'}"
+    if s["op"] == "chroma":
+        return f"chroma {s.get('mode', '420')} ({s.get('matrix', '601')})"
     return f"{s['op']}->{w}"

@@ -22,6 +22,11 @@ Step kinds
 {"op": "model", "model": "<model id>", "width": 160}
     run the model at its fixed factor, then area-resize to `width`
     ("width" may be omitted: keep the model's own output size)
+{"op": "xbr", "scale": 2, "width": 160}
+    xBR pixel-art upscale (x2/x3/x4), then area-resize to `width` (optional)
+{"op": "chroma", "mode": "420", "matrix": "601"}
+    colour resolution reduced like a video codec (422, 420, 411, 410=YUV9),
+    colour back with nearest; size unchanged, so no width
 
 `width` is pixels, or "source" (source width), or "loop" (the loop size;
 not allowed in the lead-in, which defines it).
@@ -166,6 +171,17 @@ class Recipe:
                     raise RecipeError(f"{where}: model step needs a model id")
                 if known_models is not None and m not in known_models:
                     raise RecipeError(f"{where}: unknown model {m!r}")
+            elif op == "xbr":
+                if s.get("scale") not in (2, 3, 4):
+                    raise RecipeError(f"{where}: xBR scale must be 2, 3 or 4")
+            elif op == "chroma":
+                from .chroma import MATRICES, MODES
+                if s.get("mode", "420") not in MODES:
+                    raise RecipeError(f"{where}: chroma mode must be one of {sorted(MODES)}")
+                if s.get("matrix", "601") not in MATRICES:
+                    raise RecipeError(f"{where}: chroma matrix must be one of {sorted(MATRICES)}")
+                if w is not None:
+                    raise RecipeError(f"{where}: a chroma step keeps the size, so it takes no width")
             else:
                 raise RecipeError(f"{where}: unknown op {op!r}")
 
@@ -252,6 +268,11 @@ def _step_slug(s: dict) -> str:
         return f"{m}{ws}"
     if s.get("op") == "model":
         return f"{model_short(s['model'])}@{ws}" if ws else model_short(s["model"])
+    if s.get("op") == "xbr":
+        return f"xbr{s['scale']}@{ws}" if ws else f"xbr{s['scale']}"
+    if s.get("op") == "chroma":
+        mx = "" if s.get("matrix", "601") == "601" else s["matrix"]
+        return f"c{s.get('mode', '420')}{mx}"
     return f"{s.get('op')}{ws}"
 
 

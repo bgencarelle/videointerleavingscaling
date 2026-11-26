@@ -75,6 +75,11 @@ A recipe is a JSON file with three parts:
 - `method`: `nearest`, `area`, `bilinear`, `bicubic`, `lanczos`
   - `"antialias": false`: shrink without prefiltering
   - `"fixed_point": true`: low-precision maths like old hardware scalers
+- `{"op": "xbr", "scale": 2, "width": 160}`: xBR pixel-art upscale (2, 3 or
+  4), then area to `width` (optional).
+- `{"op": "chroma", "mode": "420"}`: colour resolution reduced like a video
+  codec: `422`, `420`, `411` (DV), `410` (YUV9). Optional `"matrix": "709"`.
+  The size doesn't change, so there's no width.
 - `width`: pixels, `"source"`, or `"loop"`. Height follows the source aspect;
   for 810x1080 frames, multiples of 3 keep it exact.
 - A model step runs the model, then area-resizes to `width`.
