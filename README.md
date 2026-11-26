@@ -24,7 +24,7 @@ listed as ok or FAIL.
 ## Try it
 
 ```bash
-# how long would this pass take on all frames?
+# how long would this pass take on all frames? (times one full batch)
 .venv/bin/python -m faceloop bench examples/demo.json --source /path/to/frames
 
 # run it on the first 20 frames only
@@ -66,7 +66,9 @@ A recipe is a JSON file with three parts:
   "pattern": ["A", "B"],
   "iterations": 200,
   "save_every": 25,
-  "finish": "auto"
+  "finish": [
+    {"op": "resize", "method": "bicubic", "width": "source"}
+  ]
 }
 ```
 
@@ -77,9 +79,8 @@ A recipe is a JSON file with three parts:
   for 810x1080 frames, multiples of 3 keep it exact.
 - A model step runs the model, then area-resizes to `width`.
 - A cycle that doesn't end at the loop size is landed there with area.
-- `finish`: `"auto"` uses RealESRNet x4 while `finish_threshold` (default 2)
-  or more is left, then area for the rest. Or give a list of steps. It
-  always lands exactly on the source size.
+- `finish`: a list of steps back to full size (e.g. one bicubic resize).
+  Area lands them exactly on the source size; `[]` means just area.
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
 - `light`: `"linear"` (default) or `"encoded"`.
 - `output`: default `{"format": "webp", "quality": 95, "sharp_yuv": true}`;
@@ -111,7 +112,7 @@ run code.
 runs/
   catalog.csv
   <source folder>/
-    demo_area162_near54-w2xcunetn1@108-avv3@L+..._esrnet_GAN_xxxx/
+    demo_area162_near54-w2xcunetn1@108-avv3@L+..._bicS_GAN_xxxx/
       c0025/ c0050/ ...     frames, named like the sources, .webp
       recipe.json           every setting + versions + model checksums
       log.txt

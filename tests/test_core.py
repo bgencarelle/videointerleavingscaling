@@ -10,7 +10,7 @@ from faceloop.colour import (GammaCurve, ParametricCurve, SRGBCurve, TableCurve,
                              curves_from_icc, quantize)
 from faceloop.engine import run_pass, run_cycle, StepContext, Controls, Progress
 from faceloop.kernels import METHODS, KernelResizer, weights_1d
-from faceloop.recipe import Recipe, RecipeError, auto_finish_steps
+from faceloop.recipe import Recipe, RecipeError
 from faceloop.sizes import Size, aspect_error, height_for, size_for
 
 
@@ -259,17 +259,6 @@ def test_linear_light_differs_from_encoded(tmp_path):
 
 
 # ------------------------------------------------------------------ new pass shape
-def test_auto_finish_chain():
-    def plan(cur, threshold=2.0):
-        return [(s.get("model", s.get("method")), s["width"]) for s in auto_finish_steps(cur, 810, threshold)]
-    assert plan(162) == [("realesrnet-x4", 648), ("area", "source")]
-    assert plan(40) == [("realesrnet-x4", 160), ("realesrnet-x4", 640), ("area", "source")]
-    assert plan(300) == [("realesrnet-x4", 1200), ("area", "source")]   # overshoot, area down
-    assert plan(450) == [("area", "source")]                          # under 2x left: no AI
-    assert plan(450, 1.5) == [("realesrnet-x4", 1800), ("area", "source")]
-    assert plan(810) == [("area", "source")]
-
-
 def test_cycles_run_at_loop_size_and_saves_are_full_size(tmp_path):
     src, _ = _make_source(tmp_path)
     sizes = []
@@ -295,9 +284,13 @@ def test_lead_in_cannot_use_loop_width():
         _recipe(lead_in=[])
 
 
-def test_finish_changes_code_but_not_loop():
+def test_finish_is_required_and_part_of_the_code():
     a = _recipe()
-    b = _recipe(finish="auto")
+    b = _recipe(finish=[{"op": "resize", "method": "bicubic", "width": "source"}])
     assert a.code() != b.code()
-    assert b.slug().endswith("_esrnet")
-    assert "realesrnet-x4" in b.model_ids()
+    assert b.slug().endswith("_bicS")
+    assert _recipe(finish=[]).slug().endswith("_area")
+    d = {"lead_in": [{"op": "resize", "method": "area", "width": 32}], "pattern": ["A"],
+         "cycles": {"A": [{"op": "resize", "method": "area", "width": 16}]}, "iterations": 1, "save_every": 1}
+    with pytest.raises(RecipeError):
+        Recipe.from_dict(d)

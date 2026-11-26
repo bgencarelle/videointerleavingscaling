@@ -10,10 +10,9 @@ cycles    A, B, C ... alternate in `pattern` order. Every cycle starts and
 finish    takes a *copy* of the frames back to the source size at every save
           point (every `save_every` cycles and after the last). The loop
           itself carries on from the small frames, untouched.
-          "auto" (default): RealESRNet x4 while `finish_threshold` (default
-          2x) or more is still needed (overshooting is fine), then area for
-          the rest. Or a list of your own steps.
-          Either way an area resize lands exactly on the source size.
+          You choose the finish steps like any others (in the GUI). If they
+          don't end exactly at the source size, an area resize lands them.
+          An empty finish means just that area resize.
 
 Step kinds
 ----------
@@ -36,12 +35,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Bump when pixel output for the same recipe would change.
-ENGINE_PIXELS_VERSION = 3
+ENGINE_PIXELS_VERSION = 4
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
                 "bicubic": "bic", "lanczos": "lanc"}
 
-AUTO_FINISH_MODEL = "realesrnet-x4"  # accuracy-trained, upscaling only, x4
 
 
 class RecipeError(ValueError):
@@ -55,8 +53,7 @@ class Recipe:
     pattern: list[str]
     iterations: int
     save_every: int
-    finish: Any = "auto"            # "auto" | list of steps
-    finish_threshold: float = 2.0   # auto finish: AI x2 only while this much is left
+    finish: list[dict[str, Any]] = field(default_factory=list)
     rounding: str = "srgb"          # "srgb" | "linear"
     light: str = "linear"           # kernel steps: "linear" | "encoded"
     output: dict[str, Any] = field(default_factory=lambda: {
@@ -67,21 +64,21 @@ class Recipe:
     @classmethod
     def from_dict(cls, d: dict) -> "Recipe":
         known = {"lead_in", "cycles", "pattern", "iterations", "save_every", "finish",
-                 "finish_threshold", "rounding", "light", "output", "name"}
+                 "rounding", "light", "output", "name"}
         extra = set(d) - known - {"version", "code", "slug", "engine", "source"}
         if extra:
             raise RecipeError(f"unknown recipe keys: {sorted(extra)}")
         if "lead_in" not in d:
             raise RecipeError("recipe needs a lead_in (steps from the source down to the loop size)")
-        fin = d.get("finish", "auto")
+        if "finish" not in d:
+            raise RecipeError("recipe needs a finish (steps back to the source size; [] = just area)")
         r = cls(
             lead_in=[dict(s) for s in d["lead_in"]],
             cycles={k: [dict(s) for s in v] for k, v in d["cycles"].items()},
             pattern=list(d["pattern"]),
             iterations=int(d["iterations"]),
             save_every=int(d["save_every"]),
-            finish=fin if fin == "auto" else [dict(s) for s in fin],
-            finish_threshold=float(d.get("finish_threshold", 2.0)),
+            finish=[dict(s) for s in d["finish"]],
             rounding=d.get("rounding", "srgb"),
             light=d.get("light", "linear"),
             output=dict(d.get("output") or {"format": "webp", "quality": 95, "sharp_yuv": True}),
@@ -105,7 +102,6 @@ class Recipe:
             "iterations": self.iterations,
             "save_every": self.save_every,
             "finish": copy.deepcopy(self.finish),
-            "finish_threshold": self.finish_threshold,
             "rounding": self.rounding,
             "light": self.light,
             "output": dict(self.output),
@@ -115,21 +111,17 @@ class Recipe:
 
     # ------------------------------------------------------------ checks
     def all_steps(self):
-        """(where, step) for every step the recipe can run (auto finish excluded)."""
+        """(where, step) for every step the recipe can run."""
         for i, s in enumerate(self.lead_in):
             yield f"lead-in step {i + 1}", s
         for name in dict.fromkeys(self.pattern):
             for i, s in enumerate(self.cycles.get(name, [])):
                 yield f"cycle {name} step {i + 1}", s
-        if isinstance(self.finish, list):
-            for i, s in enumerate(self.finish):
-                yield f"finish step {i + 1}", s
+        for i, s in enumerate(self.finish):
+            yield f"finish step {i + 1}", s
 
     def model_ids(self) -> set[str]:
-        ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
-        if self.finish == "auto":
-            ids.add(AUTO_FINISH_MODEL)
-        return ids
+        return {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
 
     def validate(self, known_models: set[str] | None = None) -> None:
         if not self.lead_in:
@@ -150,10 +142,8 @@ class Recipe:
             raise RecipeError("rounding must be 'srgb' or 'linear'")
         if self.light not in ("linear", "encoded"):
             raise RecipeError("light must be 'linear' or 'encoded'")
-        if not (self.finish == "auto" or isinstance(self.finish, list)):
-            raise RecipeError("finish must be 'auto' or a list of steps")
-        if self.finish_threshold <= 1.0:
-            raise RecipeError("finish_threshold must be more than 1")
+        if not isinstance(self.finish, list):
+            raise RecipeError("finish must be a list of steps")
         fmt = self.output.get("format", "webp")
         if fmt not in ("webp", "png"):
             raise RecipeError("output format must be 'webp' or 'png'")
@@ -178,8 +168,6 @@ class Recipe:
                     raise RecipeError(f"{where}: unknown model {m!r}")
             else:
                 raise RecipeError(f"{where}: unknown op {op!r}")
-        if known_models is not None and self.finish == "auto" and AUTO_FINISH_MODEL not in known_models:
-            raise RecipeError(f"auto finish needs model {AUTO_FINISH_MODEL}")
 
     # ------------------------------------------------------- identity
     def pixel_identity(self) -> dict:
@@ -191,7 +179,6 @@ class Recipe:
             "cycles": used,
             "pattern": self.pattern,
             "finish": self.finish,
-            "finish_threshold": self.finish_threshold if self.finish == "auto" else None,
             "rounding": self.rounding,
             "light": self.light,
             "output": self.output,
@@ -207,10 +194,7 @@ class Recipe:
     def slug(self, gan_models: set[str] | None = None, max_len: int = 80) -> str:
         lead = "-".join(_step_slug(s) for s in self.lead_in)
         cyc = "+".join("-".join(_step_slug(s) for s in self.cycles[k]) for k in _unique(self.pattern))
-        if self.finish == "auto":
-            fin = "esrnet" if self.finish_threshold == 2.0 else f"esrnet{self.finish_threshold:g}"
-        else:
-            fin = "-".join(_step_slug(s) for s in self.finish) or "area"
+        fin = "-".join(_step_slug(s) for s in self.finish) or "area"
         flags = []
         if gan_models and self.uses_gan(gan_models):
             flags.append("GAN")
@@ -238,17 +222,6 @@ class Recipe:
         if not pts or pts[-1] != self.iterations:
             pts.append(self.iterations)
         return pts
-
-
-def auto_finish_steps(cur_width: int, src_width: int, threshold: float = 2.0) -> list[dict]:
-    """RealESRNet x4 while `threshold` or more is left, then area lands."""
-    steps = []
-    w = cur_width
-    while src_width / w >= threshold:
-        w *= 4
-        steps.append({"op": "model", "model": AUTO_FINISH_MODEL, "width": w})
-    steps.append({"op": "resize", "method": "area", "width": "source"})
-    return steps
 
 
 def _unique(seq):

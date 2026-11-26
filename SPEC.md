@@ -32,14 +32,12 @@ loop / finish pass shape. The GUI is stage 5.
 - **Model steps:** run the model at its fixed factor (x1, x2, x3 or x4), then
   an area resize to the step's width. Without a width the model's own output
   size is kept.
-- **Finish:** `"auto"` (default) is **RealESRNet x4**: accuracy-trained,
-  upscaling-only, and a plain conv net, so it's fast on the GPU. It runs x4
-  while `finish_threshold` (default 2x) or more is still needed; overshooting
-  is fine. Once less is left, plain **area** covers the rest (not AI). Or
-  write your own finish steps (AI or not). Either way an area resize lands
-  exactly on the source size. Example: loop 162 wide → RealESRNet x4 → 648
-  → area → 810. (The first version of the finish used SwinIR classical; it
-  cost about 0.9 s per frame per save on the M6, more than the looping.)
+- **Finish:** you choose it, like any other steps (in the GUI). Area lands
+  it exactly on the source size if its steps don't end there; an empty
+  finish is just that area resize. There is no automatic finish. Example:
+  loop 162x216 → bicubic → 810x1080. (Earlier versions had an automatic AI
+  finish, SwinIR then RealESRNet. They cost 0.9 s and 0.37 s per frame per
+  save on the M6, more than the looping itself.)
 - Replaces the first design, where every cycle returned to the source size.
 - **Queue:** passes are built by hand and run one after another. No grid.
 
@@ -124,7 +122,7 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   reuses the folder.
 - The `slug` is readable: `<lead-in>_<cycles>_<finish>`. Steps are written
   like `area162`, `near54`, `w2xcunetn1@108`, `avv3@L` (L = loop size,
-  S = source); cycles are joined with `+`; the finish is `esrnet` for auto.
+  S = source); cycles are joined with `+`; the finish is written the same way (`area` if empty).
   Then come the flags `GAN`
   (any GAN-labelled model), `rlin` (linear rounding), `enc` (no linear light).
   Long slugs are shortened with `~` but always keep the flags.

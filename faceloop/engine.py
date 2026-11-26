@@ -27,7 +27,7 @@ from . import __version__
 from .colour import Transfer, curves_from_icc, quantize
 from .imageio import list_frames, load_frame, probe, save_frame, webp_backend
 from .kernels import KernelResizer
-from .recipe import Recipe, RecipeError, auto_finish_steps
+from .recipe import Recipe, RecipeError
 from .sizes import Size, size_for
 
 
@@ -131,16 +131,9 @@ def run_lead_in(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tens
     return x
 
 
-def finish_steps(recipe: Recipe, loop: Size, src: Size) -> list[dict]:
-    if recipe.finish == "auto":
-        return auto_finish_steps(loop.width, src.width, recipe.finish_threshold)
-    return recipe.finish
-
-
 def run_finish(x: torch.Tensor, recipe: Recipe, ctx: StepContext) -> torch.Tensor:
     """Take a copy of the loop frames back to the source size."""
-    cur = Size(x.shape[-1], x.shape[-2])
-    return run_steps(x, finish_steps(recipe, cur, ctx.src), ctx, ctx.src)
+    return run_steps(x, recipe.finish, ctx, ctx.src)
 
 
 # ------------------------------------------------------------- output
@@ -247,7 +240,7 @@ def default_batch_size(src: Size, recipe: Recipe, ram: int | None = None) -> int
     loop, biggest = _sim(recipe.lead_in, src, src, None, src.width * src.height)
     for k in set(recipe.pattern):
         _, biggest = _sim(recipe.cycles[k], loop, src, loop, biggest)
-    _, biggest = _sim(finish_steps(recipe, loop, src), loop, src, loop, biggest)
+    _, biggest = _sim(recipe.finish, loop, src, loop, biggest)
     per_frame = biggest * 3 * 4 * 4  # float32, a few temporaries
     budget = ram * 0.20
     return int(max(1, min(64, budget // per_frame)))
@@ -418,7 +411,7 @@ def _update_catalog(out_root: Path, source: Path, folder: Path, recipe: Recipe,
         with open(path, newline="", encoding="utf-8") as f:
             rows = [r for r in csv.DictReader(f)
                     if not (r.get("code") == recipe.code() and r.get("source") == source.name)]
-    fin = "auto (RealESRNet)" if recipe.finish == "auto" else ", ".join(_describe_step(s) for s in recipe.finish)
+    fin = ", ".join(_describe_step(s) for s in recipe.finish) or "area"
     cyc = ("lead-in: " + ", ".join(_describe_step(s) for s in recipe.lead_in) + " | "
            + " | ".join(f"{k}: " + ", ".join(_describe_step(s) for s in recipe.cycles[k])
                         for k in dict.fromkeys(recipe.pattern))

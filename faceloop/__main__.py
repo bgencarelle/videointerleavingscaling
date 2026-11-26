@@ -113,7 +113,7 @@ def _load_recipe(path):
     return Recipe.load(path)
 
 
-def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, device=None, models=None):
+def bench(recipe, source: Path, frames: int | None = None, cycles: int | None = None, device=None, models=None):
     """Time `frames` frames through a few cycles; return a dict of estimates."""
     import numpy as np
     from .colour import Transfer, curves_from_icc
@@ -130,7 +130,8 @@ def bench(recipe, source: Path, frames: int = 4, cycles: int | None = None, devi
     w, h, icc = probe(allf[0])
     src = Size(w, h)
     bs = default_batch_size(src, recipe)
-    n = max(1, min(frames, bs, len(allf)))
+    # a full batch by default: the GPU is much faster per frame in big batches
+    n = max(1, min(frames or bs, bs, len(allf)))
     pick = [allf[int(i * (len(allf) - 1) / max(1, n - 1))] for i in range(n)] if n > 1 else allf[:1]
     x0 = torch.from_numpy(np.stack([load_frame(p)[0] for p in pick])).to(device).permute(0, 3, 1, 2).float() / 255
     ctx = StepContext(src=src, transfer=Transfer(curves_from_icc(icc)[0]), light=recipe.light,
@@ -228,7 +229,7 @@ def main(argv=None):
     b = sub.add_parser("bench")
     b.add_argument("recipe")
     b.add_argument("--source", required=True)
-    b.add_argument("--frames", type=int, default=4)
+    b.add_argument("--frames", type=int, default=None, help="frames to time (default: one full batch)")
     b.add_argument("--cycles", type=int, default=None)
     r = sub.add_parser("run")
     r.add_argument("recipe")

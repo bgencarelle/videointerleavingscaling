@@ -17,5 +17,7 @@
   "pattern": ["A", "B"],
   "iterations": 200,
   "save_every": 25,
-  "finish": "auto"
+  "finish": [
+    {"op": "resize", "method": "bicubic", "width": "source"}
+  ]
 }
