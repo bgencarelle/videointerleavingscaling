@@ -1086,6 +1086,40 @@
      "sha256": "1641f8c4464b9f097c9fdda5589273713f67cf59f3d909e0bd688f0cee269dca"
     }
    ]
+  },
+  {
+   "id": "irn-x2",
+   "family": "irn",
+   "label": "accuracy",
+   "scale": 2,
+   "backend": "irn",
+   "args": {
+    "scale": 2
+   },
+   "description": "IRN x2 (Invertible Rescaling Network): learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x2.pth in weights/irn/",
+   "files": [
+    {
+     "path": "irn/IRN_x2.pth",
+     "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
+    }
+   ]
+  },
+  {
+   "id": "irn-x4",
+   "family": "irn",
+   "label": "accuracy",
+   "scale": 4,
+   "backend": "irn",
+   "args": {
+    "scale": 4
+   },
+   "description": "IRN x4 (Invertible Rescaling Network): learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x4.pth in weights/irn/",
+   "files": [
+    {
+     "path": "irn/IRN_x4.pth",
+     "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
+    }
+   ]
   }
  ],
  "manual": [
@@ -1093,6 +1127,11 @@
    "id": "hat",
    "description": "HAT: official weights are on Google Drive (see github.com/XPixelGroup/HAT). Download e.g. HAT_SRx4_ImageNet-pretrain.pth (accuracy) or Real_HAT_GAN_SRx4.pth (GAN) and put it in weights/dropin/ with a .json label next to it (see README).",
    "url": "https://github.com/XPixelGroup/HAT"
+  },
+  {
+   "id": "irn",
+   "description": "IRN: download IRN_x2.pth and/or IRN_x4.pth from the authors' Google Drive (linked from github.com/pkuxmq/Invertible-Image-Rescaling) and put them in weights/irn/.",
+   "url": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
   }
  ]
 }

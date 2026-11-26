@@ -303,9 +303,16 @@ class App:
         out.update({"slug": r.slug(gan), "code": r.code(), "folder": r.folder_name(gan),
                     "gan": r.uses_gan(gan), "saves": r.save_points()})
         missing = sorted(m for m in r.model_ids() if not self.models.is_downloaded(m))
-        if missing:
+        irn_missing = [m for m in missing if m.startswith("irn-")]
+        other = [m for m in missing if not m.startswith("irn-")]
+        if other:
             out["ok"] = False
-            out["errors"].append("models not downloaded: " + ", ".join(missing))
+            out["errors"].append("models not downloaded: " + ", ".join(other))
+        for m in irn_missing:
+            out["ok"] = False
+            sc = m.split("x")[-1]
+            out["errors"].append(f"IRN x{sc} weights missing: download IRN_x{sc}.pth from the authors' "
+                                 f"Google Drive (link in README) and put it in {self.models.weights_dir / 'irn'}")
         src = body.get("source")
         if src:
             try:

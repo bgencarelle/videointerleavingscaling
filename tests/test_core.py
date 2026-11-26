@@ -414,3 +414,15 @@ def test_pause_keeps_the_reserved_share_idle(monkeypatch):
     assert len(slept) == 1
     with pytest.raises(ValueError):
         t.set("50")
+
+
+def test_dpid_step_in_a_pass(tmp_path):
+    src, _ = _make_source(tmp_path)
+    r = _recipe(cycles={"A": [{"op": "resize", "method": "dpid", "width": 8, "lambda": 0.5},
+                              {"op": "resize", "method": "bicubic", "width": "loop"}]}, pattern=["A"],
+                iterations=2, save_every=2)
+    assert "dpid0.5" in r.slug()
+    res = run_pass(r, src, tmp_path / "out", device=torch.device("cpu"), batch_size=8)
+    assert len(list((res.folder / "c0002").glob("*.webp"))) == 8
+    with pytest.raises(RecipeError):
+        _recipe(cycles={"A": [{"op": "resize", "method": "dpid", "width": 8, "lambda": -1}]}, pattern=["A"])

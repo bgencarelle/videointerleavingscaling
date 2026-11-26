@@ -82,6 +82,13 @@ def _target(step: dict, src: Size, cur: Size, loop: Size | None = None) -> Size 
 def _kernel(x: torch.Tensor, target: Size, method: str, ctx: StepContext, **kw) -> torch.Tensor:
     if (x.shape[-1], x.shape[-2]) == (target.width, target.height):
         return x
+    if method == "dpid":
+        from .dpid import dpid
+        lam = float(kw.get("lam", 1.0))
+        if ctx.light == "linear":
+            y = dpid(ctx.transfer.decode(x), target.width, target.height, lam)
+            return ctx.transfer.encode(y.clamp(0, 1))
+        return dpid(x, target.width, target.height, lam).clamp(0, 1)
     if ctx.light == "linear":
         y = ctx.resizer.resize(ctx.transfer.decode(x), target.width, target.height, method, **kw)
         return ctx.transfer.encode(y.clamp(0, 1))
@@ -92,7 +99,10 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     cur = Size(x.shape[-1], x.shape[-2])
     op = step["op"]
     if op == "resize":
-        kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
+        if step["method"] == "dpid":
+            kw = {"lam": step.get("lambda", 1.0)}
+        else:
+            kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
         x = _kernel(x, _target(step, ctx.src, cur, ctx.loop), step["method"], ctx, **kw)
     elif op == "model":
         if ctx.models is None:
@@ -105,6 +115,12 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     elif op == "xbr":
         from .pixelart import xbr
         x = xbr(x, int(step["scale"])).clamp(0, 1)
+        t = _target(step, ctx.src, cur, ctx.loop)
+        if t is not None:
+            x = _kernel(x, t, "area", ctx)
+    elif op == "irn":
+        m = ctx.models.get_irn(int(step["scale"]), x.device)
+        x = (m.down(x) if step["direction"] == "down" else m.up(x)).clamp(0, 1)
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
@@ -322,6 +338,11 @@ def step_size(st: dict, cur: Size, src: Size, loop: Size | None, scale_of) -> tu
     w = st.get("width")
     tgt = src if w == "source" else (loop if w == "loop" else (size_for(int(w), src) if isinstance(w, int) else None))
     op = st.get("op")
+    if op == "irn":
+        k = int(st["scale"])
+        raw = ([-(-cur.width // k), -(-cur.height // k)] if st.get("direction") == "down"
+               else [cur.width * k, cur.height * k])
+        return (tgt or Size(*raw)), raw, True
     if op in ("model", "xbr"):
         k = scale_of(st)
         if not k:
@@ -403,7 +424,9 @@ def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: in
             tgt = size_for(w, src)
         else:
             tgt = None
-        if s.get("op") in ("model", "xbr"):
+        if s.get("op") == "irn" and s.get("direction") == "down":
+            cur = tgt or Size(-(-cur.width // int(s["scale"])), -(-cur.height // int(s["scale"])))
+        elif s.get("op") in ("model", "xbr", "irn"):
             k = int(s.get("scale", 4))  # models: assume up to x4 before landing
             biggest = max(biggest, cur.width * cur.height * k * k)
             cur = tgt or Size(cur.width * k, cur.height * k)
@@ -429,7 +452,9 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
             before = cur
             cur, raw, ok = step_size(st, cur, src, loop, scale_of)
             rows.append({"width": cur.width, "height": cur.height, "from": [before.width, before.height],
-                         "raw": raw, "scale": scale_of(st) if st.get("op") in ("model", "xbr") else None,
+                         "raw": raw, "scale": (int(st["scale"]) if st.get("op") == "irn"
+                                               else scale_of(st) if st.get("op") in ("model", "xbr") else None),
+                         "dir": st.get("direction"),
                          "error": round(aspect_error(cur, src), 3),
                          "note": "" if ok else "scale unknown until loaded"})
         if land is not None and cur != land:
@@ -756,4 +781,6 @@ def _describe_step(s: dict) -> str:
         return f"xBR x{s['scale']}->{w if w else 'native'}"
     if s["op"] == "chroma":
         return f"chroma {s.get('mode', '420')} ({s.get('matrix', '601')})"
+    if s["op"] == "irn":
+        return f"IRN {s['direction']} x{s['scale']}->{w if w else 'native'}"
     return f"{s['op']}->{w}"

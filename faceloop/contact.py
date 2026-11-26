@@ -43,6 +43,8 @@ def step_label(s: dict) -> str:
             extra.append("no-AA")
         if s.get("fixed_point"):
             extra.append("fixed")
+        if s["method"] == "dpid":
+            extra.append(f"λ{s.get('lambda', 1.0):g}")
         return f"{s['method']}{' ' + ' '.join(extra) if extra else ''}->{ws}"
     if op == "model":
         return f"{s['model']}->{ws or 'native'}"
@@ -50,6 +52,8 @@ def step_label(s: dict) -> str:
         return f"xBR x{s['scale']}->{ws or 'native'}"
     if op == "chroma":
         return f"chroma {s.get('mode', '420')}"
+    if op == "irn":
+        return f"IRN {'shrink' if s['direction'] == 'down' else 'enlarge'} x{s['scale']}->{ws or 'native'}"
     return op or "?"
 
 

@@ -215,7 +215,7 @@ async function api(path, body) {
 const fileUrl = p => "/api/file?path=" + encodeURIComponent(p);
 
 // ------------------------------------------------------------------ state
-const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos"];
+const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid"];
 const CHROMA = [["420", "4:2:0"], ["422", "4:2:2"], ["411", "4:1:1 (DV)"], ["410", "4:1:0 (YUV9)"]];
 let MODELS = [];
 let state = {
@@ -235,15 +235,16 @@ function recipe() {
 }
 
 function defaultStep(op) {
-  if (op === "model") { const m = MODELS.find(m => m.downloaded && m.family !== "dropin") || MODELS[0]; return {op, model: m ? m.id : "", width: null}; }
+  if (op === "model") { const m = MODELS.find(m => m.downloaded && !["dropin", "irn"].includes(m.family)) || MODELS[0]; return {op, model: m ? m.id : "", width: null}; }
   if (op === "xbr") return {op, scale: 2, width: null};
   if (op === "chroma") return {op, mode: "420"};
+  if (op === "irn") return {op, direction: "down", scale: 2, width: null};
   return {op: "resize", method: "bicubic", width: "loop"};
 }
 
 // ------------------------------------------------------------------ step editor
 function modelOptions(sel) {
-  const fam = {}; MODELS.forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
+  const fam = {}; MODELS.filter(m => m.family !== "irn").forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
   let h = "";
   for (const [f, list] of Object.entries(fam)) {
     h += `<optgroup label="${esc(f)}">`;
@@ -257,10 +258,10 @@ function modelOptions(sel) {
 }
 
 function stepHTML(s, i, n) {
-  const opSel = `<select data-k="op">${["resize", "model", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
+  const opSel = `<select data-k="op">${["resize", "model", "irn", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
   let f = "";
   const mode = s.width == null ? "keep" : (s.width === "loop" || s.width === "source" ? s.width : "px");
-  const keepLabel = s.op === "xbr" ? "keep the xBR size" : "keep the model's size";
+  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size" : "keep the model's size");
   const wOpts = (s.op === "resize" ? [] : [["keep", keepLabel]]).concat(
     s.op === "resize" ? [["loop", "the loop size"], ["source", "the source size"], ["px", "a width of"]]
                       : [["loop", "resize to the loop size"], ["source", "resize to the source size"], ["px", "resize to a width of"]]);
@@ -268,11 +269,20 @@ function stepHTML(s, i, n) {
     + (mode === "px" ? ` <input data-k="wpx" type="number" min="1" style="width:76px" value="${esc(s.width)}"> px` : "");
   if (s.op === "resize") {
     f = `<select data-k="method">${KERNELS.map(k => `<option ${s.method === k ? "selected" : ""}>${k}</option>`).join("")}</select> to ${w}`;
-    if (!["nearest", "area"].includes(s.method)) f += `
+    if (s.method === "dpid") f += `
+      <label class="muted" title="0 = plain box filter; higher keeps small details that stand out (default 1)">detail λ
+        <input data-k="lambda" type="number" min="0" max="10" step="0.1" style="width:64px" value="${s.lambda ?? 1}"></label>`;
+    else if (!["nearest", "area"].includes(s.method)) f += `
       <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
       <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
   } else if (s.op === "model") {
     f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then ${w}`;
+  } else if (s.op === "irn") {
+    const have = MODELS.find(m => m.id === `irn-x${s.scale}`);
+    f = `<select data-k="direction"><option value="down" ${s.direction === "down" ? "selected" : ""}>shrink</option>
+        <option value="up" ${s.direction === "up" ? "selected" : ""}>enlarge</option></select>
+      <select data-k="scale">${[2, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">${s.direction === "down" ? "÷" : "×"}${k}</option>`).join("")}</select>
+      then ${w}${have && !have.downloaded ? ` <span class="err">weights missing</span>` : ""}`;
   } else if (s.op === "xbr") {
     f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select> then ${w}`;
   } else if (s.op === "chroma") {
@@ -304,9 +314,12 @@ function renderSteps(el, list) {
       if (k === "wpx") { const n = parseInt(inp.value, 10); s.width = n > 0 ? n : s.width; }
       else if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
       else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
-      else if (k === "scale") s.scale = +inp.value;
+      else if (k === "scale") { s.scale = +inp.value; if (s.op === "irn") { changed(); render(); return; } }
+      else if (k === "direction") { s.direction = inp.value; render(); return; }
+      else if (k === "lambda") { const v = parseFloat(inp.value); if (v === 1 || isNaN(v)) delete s.lambda; else s.lambda = v; }
       else s[k] = inp.value;
-      if (k === "method" && ["nearest", "area"].includes(s.method)) { delete s.antialias; delete s.fixed_point; render(); return; }
+      if (k === "method" && ["nearest", "area", "dpid"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
+      if (k === "method" && s.method !== "dpid") delete s.lambda;
       if (k === "method") { render(); return; }
       if (s.width === null && s.op !== "resize") delete s.width;
       if (s.matrix === "601") delete s.matrix;
@@ -373,7 +386,7 @@ function sizeText(r) {
   };
   if (r.raw) {
     const same = r.raw[0] === r.width && r.raw[1] === r.height;
-    return `×${r.scale} → ${dim(r.raw[0], r.raw[1])}` + (same ? ` <span class="e">(no extra resize)</span>`
+    return `${r.dir === "down" ? "÷" : "×"}${r.scale} → ${dim(r.raw[0], r.raw[1])}` + (same ? ` <span class="e">(no extra resize)</span>`
       : `, then area ${r.raw[0] > r.width ? "↓" : "↑"} ${dim(r.width, r.height)}${change(r.raw, r.width)}`) + e;
   }
   const note = r.note ? ` <span class="e">${esc(r.note)}</span>` : "";

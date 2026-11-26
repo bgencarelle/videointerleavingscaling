@@ -11,7 +11,7 @@ from faceloop.colour import Transfer
 from faceloop.engine import StepContext, run_cycle
 from faceloop.kernels import KernelResizer
 from faceloop.models import ModelInfo, ModelManager, ModelRunner
-from faceloop.recipe import Recipe, model_short
+from faceloop.recipe import Recipe, RecipeError, model_short
 from faceloop.sizes import Size
 
 WEIGHTS = Path(os.environ.get("FACELOOP_WEIGHTS", Path(__file__).resolve().parents[1] / "weights"))
@@ -47,6 +47,9 @@ def test_catalog_is_complete_and_pinned():
     for m in data["models"]:
         assert m["label"] in ("GAN", "accuracy")
         for f in m["files"]:
+            if "manual" in f:  # weights only on a cloud drive: you download them yourself
+                assert m["family"] == "irn" and f["manual"].startswith("https://")
+                continue
             assert len(f["sha256"]) == 64
             assert f["url"].startswith("https://github.com/") or \
                 f["url"].startswith("https://raw.githubusercontent.com/nihui/")
@@ -227,3 +230,44 @@ def test_half_precision_falls_back_when_a_model_mixes_types():
     assert "autocast" in r.precision_label or r.precision_label.startswith("float32")
     y = r(torch.rand(1, 3, 8, 8))
     assert y.shape == (1, 3, 16, 16) and y.dtype == torch.float32
+
+
+def _fake_irn_weights(tmp_path, scale):
+    from faceloop.models.irn import InvRescaleNet
+    torch.manual_seed(scale)
+    net = InvRescaleNet(scale)
+    with torch.no_grad():
+        for n, p in net.named_parameters():
+            if "haar" not in n:
+                p.normal_(0, 0.01)
+    d = tmp_path / "irn"
+    d.mkdir(exist_ok=True)
+    torch.save(net.state_dict(), d / f"IRN_x{scale}.pth")
+
+
+def test_irn_steps_shrink_and_enlarge(tmp_path):
+    _fake_irn_weights(tmp_path, 4)
+    mm = ModelManager(tmp_path)
+    assert mm.is_downloaded("irn-x4") and not mm.is_downloaded("irn-x2")
+    ok, msg = mm.check("irn-x4", torch.device("cpu"))
+    assert ok, msg
+    ctx = StepContext(src=Size(64, 48), transfer=Transfer(), light="linear", rounding="srgb",
+                      resizer=KernelResizer(), models=mm)
+    seen = []
+    run_cycle(torch.rand(2, 3, 48, 64), [{"op": "irn", "direction": "down", "scale": 4},
+                                         {"op": "irn", "direction": "up", "scale": 4, "width": 40}],
+              ctx, capture=lambda i, t: seen.append(tuple(t.shape[-2:])))
+    assert seen == [(12, 16), (30, 40)]
+    with pytest.raises(FileNotFoundError):
+        mm.get_irn(2, torch.device("cpu"))
+
+
+def test_irn_in_recipes():
+    base = {"lead_in": [{"op": "resize", "method": "area", "width": 32}], "finish": [],
+            "pattern": ["A"], "iterations": 1, "save_every": 1}
+    r = Recipe.from_dict({**base, "cycles": {"A": [{"op": "irn", "direction": "down", "scale": 2},
+                                                   {"op": "irn", "direction": "up", "scale": 2, "width": "loop"}]}})
+    assert r.model_ids() == {"irn-x2"} and "irnD2-irnU2@L" in r.slug()
+    for bad in ({"op": "irn", "direction": "down", "scale": 3}, {"op": "irn", "direction": "sideways", "scale": 2}):
+        with pytest.raises(RecipeError):
+            Recipe.from_dict({**base, "cycles": {"A": [bad]}})

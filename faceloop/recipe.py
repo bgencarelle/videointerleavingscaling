@@ -21,11 +21,16 @@ Step kinds
 {"op": "resize", "method": "lanczos", "width": 320}
     plain kernel; optional "antialias": false, "fixed_point": true,
     "phase_bits": 4, "coef_bits": 6
+{"op": "resize", "method": "dpid", "width": 54, "lambda": 1.0}
+    detail-preserving downscaling (Weber et al. 2016); lambda 0 = box filter
 {"op": "model", "model": "<model id>", "width": 160}
     run the model at its fixed factor, then area-resize to `width`
     ("width" may be omitted: keep the model's own output size)
 {"op": "xbr", "scale": 2, "width": 160}
     xBR pixel-art upscale (x2/x3/x4), then area-resize to `width` (optional)
+{"op": "irn", "direction": "down", "scale": 4, "width": 54}
+    IRN (Invertible Rescaling Network) learned shrink ("down") or enlarge
+    ("up") by 2 or 4, then area-resize to `width` (optional)
 {"op": "chroma", "mode": "420", "matrix": "601"}
     colour resolution reduced like a video codec (422, 420, 411, 410=YUV9),
     colour back with nearest; size unchanged, so no width
@@ -45,7 +50,7 @@ from typing import Any
 ENGINE_PIXELS_VERSION = 5
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
-                "bicubic": "bic", "lanczos": "lanc"}
+                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid"}
 
 
 
@@ -131,7 +136,8 @@ class Recipe:
             yield f"finish step {i + 1}", s
 
     def model_ids(self) -> set[str]:
-        return {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
+        ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
+        return ids | {f"irn-x{s['scale']}" for _, s in self.all_steps() if s.get("op") == "irn"}
 
     def validate(self, known_models: set[str] | None = None) -> None:
         if not self.lead_in:
@@ -168,8 +174,12 @@ class Recipe:
             if w == "loop" and where.startswith("lead-in"):
                 raise RecipeError(f"{where}: the lead-in defines the loop size, so it can't use 'loop'")
             if op == "resize":
-                if s.get("method") not in METHODS:
+                if s.get("method") not in METHODS + ("dpid",):
                     raise RecipeError(f"{where}: unknown kernel {s.get('method')!r}")
+                if s.get("method") == "dpid":
+                    lam = s.get("lambda", 1.0)
+                    if not isinstance(lam, (int, float)) or not (0 <= lam <= 10):
+                        raise RecipeError(f"{where}: DPID lambda must be a number from 0 to 10")
                 if w is None:
                     raise RecipeError(f"{where}: resize needs a width")
             elif op == "model":
@@ -181,6 +191,13 @@ class Recipe:
             elif op == "xbr":
                 if s.get("scale") not in (2, 3, 4):
                     raise RecipeError(f"{where}: xBR scale must be 2, 3 or 4")
+            elif op == "irn":
+                if s.get("scale") not in (2, 4):
+                    raise RecipeError(f"{where}: IRN scale must be 2 or 4")
+                if s.get("direction") not in ("down", "up"):
+                    raise RecipeError(f"{where}: IRN direction must be 'down' or 'up'")
+                if known_models is not None and f"irn-x{s['scale']}" not in known_models:
+                    raise RecipeError(f"{where}: IRN x{s['scale']} isn't available")
             elif op == "chroma":
                 from .chroma import MATRICES, MODES
                 if s.get("mode", "420") not in MODES:
@@ -272,6 +289,8 @@ def _step_slug(s: dict) -> str:
     ws = _width_slug(s.get("width"))
     if s.get("op") == "resize":
         m = KERNEL_SHORT.get(s["method"], s["method"])
+        if s["method"] == "dpid" and s.get("lambda", 1.0) != 1.0:
+            m += f"{s['lambda']:g}"
         if s.get("antialias") is False:
             m += "NA"
         if s.get("fixed_point"):
@@ -281,6 +300,9 @@ def _step_slug(s: dict) -> str:
         return f"{model_short(s['model'])}@{ws}" if ws else model_short(s["model"])
     if s.get("op") == "xbr":
         return f"xbr{s['scale']}@{ws}" if ws else f"xbr{s['scale']}"
+    if s.get("op") == "irn":
+        tag = f"irn{'D' if s['direction'] == 'down' else 'U'}{s['scale']}"
+        return f"{tag}@{ws}" if ws else tag
     if s.get("op") == "chroma":
         mx = "" if s.get("matrix", "601") == "601" else s["matrix"]
         return f"c{s.get('mode', '420')}{mx}"

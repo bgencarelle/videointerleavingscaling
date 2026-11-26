@@ -62,6 +62,8 @@ contact sheets, GUI.
 | kernels | nearest, area, bilinear, bicubic (Keys a=-0.5, like Pillow), Lanczos-3 |
 | old-school variants | `antialias: false` (shrink without prefiltering), `fixed_point: true` (phase quantised to 4 bits, weights to 6 bits, 8-bit intermediate) |
 | pixel-art upscaler | xBR x2/x3/x4: Hyllian's xBR-lv2 shader (MIT), ported exactly with its defaults (threshold 0.32, smoothness 0.30, AA blending, corner C); works on stored values like the shader. Then area to the step's width. Tested: exactly symmetric under rotation, mirroring and transposing |
+| detail-preserving downscale | **DPID** (Weber et al., SIGGRAPH Asia 2016), from the authors' CUDA reference (BSD 3-Clause): area average, then a 3×3-smoothed guide, then input pixels weighted by coverage × (distance to guide)^λ. λ 0 = box filter, default 1. Uses the same light setting as the other plain resizes. Matches a loop-for-loop transcription of the reference to 1e-5 (20 size/λ combinations) |
+| learned shrink / enlarge | **IRN** ×2/×4 (Invertible Rescaling Network, Xiao et al., ECCV 2020), architecture ported from the authors' code (Apache 2.0). It produces the same output as their classes (difference 0). Shrink = forward pass, first 3 channels; enlarge = reverse pass with the latent z = 0 (its mean; the paper samples it randomly), so it's repeatable. Full precision only. Weights are only on the authors' Google Drive: you put `IRN_x2.pth` / `IRN_x4.pth` in `weights/irn/` yourself. Label: accuracy |
 | colour resolution | like video codecs: Y'CbCr (BT.601 default, or 709; full range, 8-bit), colour averaged over blocks (4:2:2, 4:2:0, 4:1:1 = DV, 4:1:0 = YUV9) and brought back with nearest; brightness keeps full resolution; size unchanged |
 | models | see below |
 

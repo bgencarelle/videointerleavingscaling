@@ -129,6 +129,12 @@ A recipe is a JSON file with three parts:
   - `"fixed_point": true`: low-precision maths like old hardware scalers
 - `{"op": "xbr", "scale": 2, "width": 160}`: xBR pixel-art upscale (2, 3 or
   4), then area to `width` (optional).
+- `{"op": "resize", "method": "dpid", "width": 54, "lambda": 1.0}`: DPID,
+  detail-preserving downscaling (keeps small highlights that stand out).
+  `lambda` 0 = plain box filter; higher = more emphasis on standout pixels.
+- `{"op": "irn", "direction": "down", "scale": 4, "width": 54}`: IRN, an AI
+  model trained as a matched shrink (`down`) and enlarge (`up`) pair, ×2 or
+  ×4, then area to `width` (optional).
 - `{"op": "chroma", "mode": "420"}`: colour resolution reduced like a video
   codec: `422`, `420`, `411` (DV), `410` (YUV9). Optional `"matrix": "709"`.
   The size doesn't change, so there's no width.
@@ -156,6 +162,12 @@ A recipe is a JSON file with three parts:
 
 The list shows every model id, its factor, and its label (`accuracy` or
 `GAN`). Passes that use a GAN-labelled model get `_GAN` in their folder name.
+
+**IRN weights** are only on the authors' Google Drive. Download `IRN_x2.pth`
+and/or `IRN_x4.pth` from
+[their folder](https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92)
+(linked from github.com/pkuxmq/Invertible-Image-Rescaling) and put them in
+`weights/irn/`. Then run `selftest`, which checks they load and run.
 
 **Your own models:** put a `.pth` or `.safetensors` file in `weights/dropin/`.
 Add a same-name `.json` to label it:
