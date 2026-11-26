@@ -129,7 +129,8 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   current one. Tested: one frame per batch and 8 frames per batch give
   byte-identical output.
 - **Model precision** (per pass): `precision: "fp16"` runs AI models in
-  half precision. Each model gets the first way that passes a test run when
+  half precision (the GUI's default for new recipes; a recipe file without
+  the key stays full precision). Each model gets the first way that passes a test run when
   it loads:
   1. weights converted to float16 (bfloat16 where spandrel says the model
      needs it)

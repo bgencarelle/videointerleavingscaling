@@ -153,8 +153,10 @@ A recipe is a JSON file with three parts:
 - `land_on_source`: `true` (default) or `false`: save at whatever size the
   finish ends (`[]` then saves the loop frames as they are).
 - `rounding`: `"srgb"` (default) or `"linear"` (harsh shadow banding).
-- `precision`: `"fp32"` (default) or `"fp16"`: AI models in half precision,
-  often much faster on the GPU, with slightly different pixels.
+- `precision`: `"fp32"` or `"fp16"`: AI models in half precision, often
+  much faster, with slightly different pixels; needed for IRN on the Neural
+  Engine. A recipe file without it means `"fp32"`; new recipes in the GUI
+  start at `"fp16"`.
   `bench ... --precision fp16` lets you compare without editing anything.
 - `light`: `"linear"` (default) or `"encoded"`.
 - `output`: default `{"format": "webp", "quality": 95, "sharp_yuv": true}`;

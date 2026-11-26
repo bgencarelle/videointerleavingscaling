@@ -130,8 +130,8 @@
         <option value="linear">8-bit in linear light (harsh shadow banding)</option></select></div>
     <div class="row">
       <label class="f">AI models</label>
-      <select id="precision"><option value="fp32">full precision (fp32)</option>
-        <option value="fp16">half precision (fp16, faster; bf16 where a model needs it)</option></select></div>
+      <select id="precision"><option value="fp16">half precision (fp16, faster; lets IRN use the Neural Engine; bf16 where a model needs it)</option>
+        <option value="fp32">full precision (fp32, slower, no Neural Engine)</option></select></div>
     <div class="row">
       <label class="f">Plain resizes</label>
       <select id="light"><option value="linear">in linear light</option><option value="encoded">on the stored values</option></select></div>
@@ -229,7 +229,7 @@ let state = {
   pattern: ["A"], iterations: 200, save_every: 25,
   finish: [{op: "resize", method: "bicubic", width: "source"}],
   land_on_source: true,
-  rounding: "srgb", light: "linear", precision: "fp32", output: {format: "webp", quality: 95, sharp_yuv: true},
+  rounding: "srgb", light: "linear", precision: "fp16", output: {format: "webp", quality: 95, sharp_yuv: true},
 };
 let preview = null;
 
