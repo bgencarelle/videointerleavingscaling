@@ -278,10 +278,15 @@ function stepHTML(s, i, n) {
   } else if (s.op === "model") {
     f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then ${w}`;
   } else if (s.op === "irn") {
-    const have = MODELS.find(m => m.id === `irn-x${s.scale}`);
-    f = `<select data-k="direction"><option value="down" ${s.direction === "down" ? "selected" : ""}>shrink</option>
+    const v = s.variant || "standard";
+    const id = v === "plus" ? `irnplus-x${s.scale}` : (v === "finetune" ? `irn-x${s.scale}-finetune` : `irn-x${s.scale}`);
+    const have = MODELS.find(m => m.id === id);
+    const scales = {standard: [2, 4, 8], plus: [4], finetune: [2]}[v];
+    f = `<select data-k="variant">${[["standard", "IRN"], ["plus", "IRN+ (GAN)"], ["finetune", "IRN finetune (JPEG-robust)"]]
+          .map(([val, t]) => `<option value="${val}" ${v === val ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <select data-k="direction"><option value="down" ${s.direction === "down" ? "selected" : ""}>shrink</option>
         <option value="up" ${s.direction === "up" ? "selected" : ""}>enlarge</option></select>
-      <select data-k="scale">${[2, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">${s.direction === "down" ? "÷" : "×"}${k}</option>`).join("")}</select>
+      <select data-k="scale">${scales.map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">${s.direction === "down" ? "÷" : "×"}${k}</option>`).join("")}</select>
       then ${w}${have && !have.downloaded ? ` <span class="err">weights missing</span>` : ""}`;
   } else if (s.op === "xbr") {
     f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select> then ${w}`;
@@ -316,6 +321,12 @@ function renderSteps(el, list) {
       else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
       else if (k === "scale") { s.scale = +inp.value; if (s.op === "irn") { changed(); render(); return; } }
       else if (k === "direction") { s.direction = inp.value; render(); return; }
+      else if (k === "variant") {
+        if (inp.value === "standard") delete s.variant; else s.variant = inp.value;
+        const sc = {standard: [2, 4, 8], plus: [4], finetune: [2]}[inp.value];
+        if (!sc.includes(s.scale)) s.scale = sc[0];
+        render(); return;
+      }
       else if (k === "lambda") { const v = parseFloat(inp.value); if (v === 1 || isNaN(v)) delete s.lambda; else s.lambda = v; }
       else s[k] = inp.value;
       if (k === "method" && ["nearest", "area", "dpid"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }

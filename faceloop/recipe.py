@@ -28,9 +28,10 @@ Step kinds
     ("width" may be omitted: keep the model's own output size)
 {"op": "xbr", "scale": 2, "width": 160}
     xBR pixel-art upscale (x2/x3/x4), then area-resize to `width` (optional)
-{"op": "irn", "direction": "down", "scale": 4, "width": 54}
+{"op": "irn", "direction": "down", "scale": 4, "variant": "standard", "width": 54}
     IRN (Invertible Rescaling Network) learned shrink ("down") or enlarge
-    ("up") by 2 or 4, then area-resize to `width` (optional)
+    ("up"), then area-resize to `width` (optional). variant "standard"
+    (x2/x4/x8), "plus" (IRN+, GAN-trained, x4) or "finetune" (JPEG-robust x2)
 {"op": "chroma", "mode": "420", "matrix": "601"}
     colour resolution reduced like a video codec (422, 420, 411, 410=YUV9),
     colour back with nearest; size unchanged, so no width
@@ -137,7 +138,7 @@ class Recipe:
 
     def model_ids(self) -> set[str]:
         ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
-        return ids | {f"irn-x{s['scale']}" for _, s in self.all_steps() if s.get("op") == "irn"}
+        return ids | {irn_id(s) for _, s in self.all_steps() if s.get("op") == "irn"}
 
     def validate(self, known_models: set[str] | None = None) -> None:
         if not self.lead_in:
@@ -192,12 +193,16 @@ class Recipe:
                 if s.get("scale") not in (2, 3, 4):
                     raise RecipeError(f"{where}: xBR scale must be 2, 3 or 4")
             elif op == "irn":
-                if s.get("scale") not in (2, 4):
-                    raise RecipeError(f"{where}: IRN scale must be 2 or 4")
+                v = s.get("variant", "standard")
+                ok = {"standard": (2, 4, 8), "plus": (4,), "finetune": (2,)}
+                if v not in ok:
+                    raise RecipeError(f"{where}: IRN variant must be standard, plus or finetune")
+                if s.get("scale") not in ok[v]:
+                    raise RecipeError(f"{where}: IRN {v} comes in x{', x'.join(map(str, ok[v]))}")
                 if s.get("direction") not in ("down", "up"):
                     raise RecipeError(f"{where}: IRN direction must be 'down' or 'up'")
-                if known_models is not None and f"irn-x{s['scale']}" not in known_models:
-                    raise RecipeError(f"{where}: IRN x{s['scale']} isn't available")
+                if known_models is not None and irn_id(s) not in known_models:
+                    raise RecipeError(f"{where}: {irn_id(s)} isn't available")
             elif op == "chroma":
                 from .chroma import MATRICES, MODES
                 if s.get("mode", "420") not in MODES:
@@ -301,7 +306,8 @@ def _step_slug(s: dict) -> str:
     if s.get("op") == "xbr":
         return f"xbr{s['scale']}@{ws}" if ws else f"xbr{s['scale']}"
     if s.get("op") == "irn":
-        tag = f"irn{'D' if s['direction'] == 'down' else 'U'}{s['scale']}"
+        v = {"plus": "P", "finetune": "F"}.get(s.get("variant", "standard"), "")
+        tag = f"irn{v}{'D' if s['direction'] == 'down' else 'U'}{s['scale']}"
         return f"{tag}@{ws}" if ws else tag
     if s.get("op") == "chroma":
         mx = "" if s.get("matrix", "601") == "601" else s["matrix"]
@@ -314,6 +320,16 @@ _SHORT = [("realesrgan-x4plus-anime", "esrAnime4"), ("realesrgan-x4plus", "esrga
           ("realesr-animevideov3", "avv3"), ("realesr-general-wdn-x4v3", "genwdn4"),
           ("realesr-general-x4v3", "gen4"), ("swinir-classical-", "swin"),
           ("w2x-cunet-denoise-", "w2xdn"), ("w2x-", "w2x"), ("rcugan-", "cug"), ("dropin-", "d")]
+
+
+def irn_id(step: dict) -> str:
+    """Model id for an IRN step: irn-x4, irnplus-x4, irn-x2-finetune ..."""
+    v = step.get("variant", "standard")
+    if v == "plus":
+        return f"irnplus-x{step['scale']}"
+    if v == "finetune":
+        return f"irn-x{step['scale']}-finetune"
+    return f"irn-x{step['scale']}"
 
 
 def model_short(mid: str) -> str:

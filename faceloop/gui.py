@@ -310,8 +310,8 @@ class App:
             out["errors"].append("models not downloaded: " + ", ".join(other))
         for m in irn_missing:
             out["ok"] = False
-            sc = m.split("x")[-1]
-            out["errors"].append(f"IRN x{sc} weights missing: download IRN_x{sc}.pth from the authors' "
+            fn = self.models.catalog[m].args["file"]
+            out["errors"].append(f"{m} weights missing: download {fn} from the authors' "
                                  f"Google Drive (link in README) and put it in {self.models.weights_dir / 'irn'}")
         src = body.get("source")
         if src:

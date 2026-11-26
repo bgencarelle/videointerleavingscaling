@@ -1094,9 +1094,10 @@
    "scale": 2,
    "backend": "irn",
    "args": {
-    "scale": 2
+    "scale": 2,
+    "file": "IRN_x2.pth"
    },
-   "description": "IRN x2 (Invertible Rescaling Network): learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x2.pth in weights/irn/",
+   "description": "IRN x2: learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x2.pth in weights/irn/",
    "files": [
     {
      "path": "irn/IRN_x2.pth",
@@ -1111,12 +1112,67 @@
    "scale": 4,
    "backend": "irn",
    "args": {
-    "scale": 4
+    "scale": 4,
+    "file": "IRN_x4.pth"
    },
-   "description": "IRN x4 (Invertible Rescaling Network): learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x4.pth in weights/irn/",
+   "description": "IRN x4: learned shrink and matching enlarge. Weights only on the authors' Google Drive: put IRN_x4.pth in weights/irn/",
    "files": [
     {
      "path": "irn/IRN_x4.pth",
+     "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
+    }
+   ]
+  },
+  {
+   "id": "irn-x8",
+   "family": "irn",
+   "label": "accuracy",
+   "scale": 8,
+   "backend": "irn",
+   "args": {
+    "scale": 8,
+    "file": "IRN_x8.pth"
+   },
+   "description": "IRN x8: learned shrink and matching enlarge (three levels). Weights only on the authors' Google Drive: put IRN_x8.pth in weights/irn/",
+   "files": [
+    {
+     "path": "irn/IRN_x8.pth",
+     "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
+    }
+   ]
+  },
+  {
+   "id": "irnplus-x4",
+   "family": "irn",
+   "label": "GAN",
+   "scale": 4,
+   "backend": "irn",
+   "args": {
+    "scale": 4,
+    "file": "IRN+_x4.pth"
+   },
+   "description": "IRN+ x4: like IRN x4 but trained with GAN and perceptual loss (sharper, invents detail). Weights only on the authors' Google Drive: put IRN+_x4.pth in weights/irn/",
+   "files": [
+    {
+     "path": "irn/IRN+_x4.pth",
+     "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
+    }
+   ]
+  },
+  {
+   "id": "irn-x2-finetune",
+   "family": "irn",
+   "label": "accuracy",
+   "scale": 2,
+   "backend": "irn",
+   "args": {
+    "scale": 2,
+    "file": "IRN_x2_finetune.pth"
+   },
+   "description": "IRN x2 fine-tuned to survive JPEG compression. Weights only on the authors' Google Drive: put IRN_x2_finetune.pth in weights/irn/",
+   "files": [
+    {
+     "path": "irn/IRN_x2_finetune.pth",
      "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
     }
    ]

@@ -357,17 +357,20 @@ class ModelManager:
         runner.descriptor = desc
         return runner
 
-    def get_irn(self, scale: int, device: torch.device):
-        """The IRN network for x2 or x4 (has .down() and .up())."""
-        mid = f"irn-x{scale}"
+    def get_irn(self, mid: str, device: torch.device):
+        """An IRN network (has .down() and .up()), e.g. 'irn-x4' or 'irnplus-x4'."""
+        info = self.catalog.get(mid)
+        if info is None or info.family != "irn":
+            raise KeyError(f"unknown IRN model {mid!r}")
         key = (mid, str(device), "irn")
         with self._lock:
             if key not in self._loaded:
+                fn = info.args["file"]
                 if not self.is_downloaded(mid):
-                    raise FileNotFoundError(f"IRN x{scale} weights missing: put IRN_x{scale}.pth in "
+                    raise FileNotFoundError(f"{mid} weights missing: put {fn} in "
                                             f"{self.weights_dir / 'irn'} (from the authors' Google Drive)")
                 from .irn import IRN
-                self._loaded[key] = IRN(self.weights_dir / "irn" / f"IRN_x{scale}.pth", scale).to(device)
+                self._loaded[key] = IRN(self.weights_dir / "irn" / fn, info.scale).to(device)
                 while len(self._loaded) > self._keep:
                     self._loaded.popitem(last=False)
             self._loaded.move_to_end(key)
@@ -377,7 +380,7 @@ class ModelManager:
         """Load and run a tiny frame natively on `device`."""
         try:
             if self.catalog[mid].family == "irn":
-                m = self.get_irn(self.catalog[mid].scale, device)
+                m = self.get_irn(mid, device)
                 x = torch.rand(1, 3, 32, 40, device=device)
                 y = m.up(m.down(x))
                 ok = y.shape == x.shape and bool(torch.isfinite(y).all())

@@ -91,7 +91,8 @@ class HaarDownsampling(nn.Module):
 
 
 class InvRescaleNet(nn.Module):
-    """IRN_x2: block_num [8]; IRN_x4: block_num [8, 8] (the authors' test configs)."""
+    """IRN_x2 (and its JPEG finetune): block_num [8]; IRN_x4 and IRN+_x4: [8, 8];
+    IRN_x8: [8, 8, 8] (the authors' test configs)."""
 
     def __init__(self, scale: int, channel_in=3, channel_out=3):
         super().__init__()
@@ -116,8 +117,8 @@ class InvRescaleNet(nn.Module):
 class IRN(nn.Module):
     def __init__(self, path: Path, scale: int):
         super().__init__()
-        if scale not in (2, 4):
-            raise ValueError("IRN scale must be 2 or 4")
+        if scale not in (2, 4, 8):
+            raise ValueError("IRN scale must be 2, 4 or 8")
         self.scale = scale
         self.net = InvRescaleNet(scale)
         sd = torch.load(str(path), map_location="cpu", weights_only=True)

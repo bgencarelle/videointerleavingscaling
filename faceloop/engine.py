@@ -119,7 +119,8 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
         if t is not None:
             x = _kernel(x, t, "area", ctx)
     elif op == "irn":
-        m = ctx.models.get_irn(int(step["scale"]), x.device)
+        from .recipe import irn_id
+        m = ctx.models.get_irn(irn_id(step), x.device)
         x = (m.down(x) if step["direction"] == "down" else m.up(x)).clamp(0, 1)
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
@@ -782,5 +783,6 @@ def _describe_step(s: dict) -> str:
     if s["op"] == "chroma":
         return f"chroma {s.get('mode', '420')} ({s.get('matrix', '601')})"
     if s["op"] == "irn":
-        return f"IRN {s['direction']} x{s['scale']}->{w if w else 'native'}"
+        v = {"plus": "IRN+", "finetune": "IRN-finetune"}.get(s.get("variant", "standard"), "IRN")
+        return f"{v} {s['direction']} x{s['scale']}->{w if w else 'native'}"
     return f"{s['op']}->{w}"

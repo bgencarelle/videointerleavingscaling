@@ -232,7 +232,7 @@ def test_half_precision_falls_back_when_a_model_mixes_types():
     assert y.shape == (1, 3, 16, 16) and y.dtype == torch.float32
 
 
-def _fake_irn_weights(tmp_path, scale):
+def _fake_irn_weights(tmp_path, scale, name=None):
     from faceloop.models.irn import InvRescaleNet
     torch.manual_seed(scale)
     net = InvRescaleNet(scale)
@@ -242,7 +242,7 @@ def _fake_irn_weights(tmp_path, scale):
                 p.normal_(0, 0.01)
     d = tmp_path / "irn"
     d.mkdir(exist_ok=True)
-    torch.save(net.state_dict(), d / f"IRN_x{scale}.pth")
+    torch.save(net.state_dict(), d / (name or f"IRN_x{scale}.pth"))
 
 
 def test_irn_steps_shrink_and_enlarge(tmp_path):
@@ -259,7 +259,26 @@ def test_irn_steps_shrink_and_enlarge(tmp_path):
               ctx, capture=lambda i, t: seen.append(tuple(t.shape[-2:])))
     assert seen == [(12, 16), (30, 40)]
     with pytest.raises(FileNotFoundError):
-        mm.get_irn(2, torch.device("cpu"))
+        mm.get_irn("irn-x2", torch.device("cpu"))
+
+
+def test_irn_variants(tmp_path):
+    _fake_irn_weights(tmp_path, 8)
+    _fake_irn_weights(tmp_path, 4, "IRN+_x4.pth")
+    _fake_irn_weights(tmp_path, 2, "IRN_x2_finetune.pth")
+    mm = ModelManager(tmp_path)
+    for mid in ("irn-x8", "irnplus-x4", "irn-x2-finetune"):
+        ok, msg = mm.check(mid, torch.device("cpu"))
+        assert ok, (mid, msg)
+    assert "irnplus-x4" in mm.gan_ids() and "irn-x8" not in mm.gan_ids()
+    m = mm.get_irn("irn-x8", torch.device("cpu"))
+    assert m.down(torch.rand(1, 3, 64, 48)).shape == (1, 3, 8, 6)
+    base = {"lead_in": [{"op": "resize", "method": "area", "width": 32}], "finish": [],
+            "pattern": ["A"], "iterations": 1, "save_every": 1}
+    r = Recipe.from_dict({**base, "cycles": {"A": [{"op": "irn", "direction": "down", "scale": 4, "variant": "plus"}]}})
+    assert r.model_ids() == {"irnplus-x4"} and "irnPD4" in r.slug() and r.slug(mm.gan_ids()).endswith("_GAN")
+    with pytest.raises(RecipeError):
+        Recipe.from_dict({**base, "cycles": {"A": [{"op": "irn", "direction": "down", "scale": 2, "variant": "plus"}]}})
 
 
 def test_irn_in_recipes():

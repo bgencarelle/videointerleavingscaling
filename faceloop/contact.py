@@ -53,7 +53,8 @@ def step_label(s: dict) -> str:
     if op == "chroma":
         return f"chroma {s.get('mode', '420')}"
     if op == "irn":
-        return f"IRN {'shrink' if s['direction'] == 'down' else 'enlarge'} x{s['scale']}->{ws or 'native'}"
+        v = {"plus": "IRN+", "finetune": "IRN-ft"}.get(s.get("variant", "standard"), "IRN")
+        return f"{v} {'shrink' if s['direction'] == 'down' else 'enlarge'} x{s['scale']}->{ws or 'native'}"
     return op or "?"
 
 
