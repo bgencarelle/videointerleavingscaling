@@ -290,3 +290,26 @@ def test_irn_in_recipes():
     for bad in ({"op": "irn", "direction": "down", "scale": 3}, {"op": "irn", "direction": "sideways", "scale": 2}):
         with pytest.raises(RecipeError):
             Recipe.from_dict({**base, "cycles": {"A": [bad]}})
+
+
+def test_irn_survives_running_out_of_memory(tmp_path):
+    _fake_irn_weights(tmp_path, 4)
+    mm = ModelManager(tmp_path)
+    m = mm.get_irn("irn-x4", torch.device("cpu"))
+    x = torch.rand(5, 3, 128, 192)  # one frame alone is too big: forces tiles
+    want_d, want_u = m._down_raw(x), m._up_raw(x[..., :16, :24])
+    real_down = m._down_raw
+
+    def picky(t):  # "runs out of memory" on more than one frame or more than 10000 pixels
+        if t.shape[0] > 1 or t.shape[-1] * t.shape[-2] > 10000:
+            raise RuntimeError("MPS backend out of memory (fake)")
+        return real_down(t)
+    m._down_raw = picky
+    m.micro, m.tile = 4, None
+    got = m.down(x)
+    assert got.shape == want_d.shape and m.micro == 1 and m.tile is not None
+    # tiles are cut with overlap, so they match the whole frame closely, not exactly
+    assert float((got - want_d).abs().mean()) < 0.02
+    m._down_raw = real_down
+    m.micro, m.tile = 4, None
+    assert torch.allclose(m.up(x[..., :16, :24]), want_u, atol=1e-5)  # no memory trouble: same result

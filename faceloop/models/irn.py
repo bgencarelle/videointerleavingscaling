@@ -128,19 +128,87 @@ class IRN(nn.Module):
         self.net.load_state_dict(sd, strict=True)
         self.net.eval().requires_grad_(False)
 
+    # ------------------------------------------------------------ running
+    # IRN holds ~140 channels per pixel inside its blocks, so a whole batch
+    # of frames rarely fits. Frames go through a few at a time; on running
+    # out of memory the group shrinks, and as a last resort frames are cut
+    # into overlapping tiles.
+    micro = 4
+    tile: int | None = None
+
     @torch.no_grad()
-    def down(self, x: torch.Tensor) -> torch.Tensor:
+    def _down_raw(self, x):
         s = self.scale
         h, w = x.shape[-2:]
         ph, pw = (-h) % s, (-w) % s
         if ph or pw:
             x = F.pad(x, (0, pw, 0, ph), mode="replicate")
-        y = self.net(x)[:, :3]
-        return y[..., : -(-h // s), : -(-w // s)]
+        return self.net(x)[:, :3][..., : -(-h // s), : -(-w // s)]
 
     @torch.no_grad()
-    def up(self, x: torch.Tensor) -> torch.Tensor:
+    def _up_raw(self, x):
         s = self.scale
         n, c, h, w = x.shape
         z = torch.zeros(n, c * (s * s - 1), h, w, device=x.device, dtype=x.dtype)
         return self.net(torch.cat((x, z), 1), rev=True)
+
+    def _tiled(self, fn, x, down: bool):
+        s = self.scale
+        n, c, h, w = x.shape
+        # tile and overlap in input pixels; multiples of s when shrinking so tiles line up
+        t, o = (self.tile // s * s, 32 // s * s or s) if down else (self.tile, 8)
+        oh, ow = (-(-h // s), -(-w // s)) if down else (h * s, w * s)
+        out = torch.empty(n, c, oh, ow, device=x.device, dtype=x.dtype)
+        for y0 in range(0, h, t):
+            for x0 in range(0, w, t):
+                y1, x1 = min(h, y0 + t), min(w, x0 + t)
+                ya, xa = max(0, y0 - o), max(0, x0 - o)
+                yb, xb = min(h, y1 + o), min(w, x1 + o)
+                r = fn(x[..., ya:yb, xa:xb])
+                if down:
+                    oy0, oy1, ox0, ox1 = y0 // s, -(-y1 // s), x0 // s, -(-x1 // s)
+                    ry, rx = (y0 - ya) // s, (x0 - xa) // s
+                else:
+                    oy0, oy1, ox0, ox1 = y0 * s, y1 * s, x0 * s, x1 * s
+                    ry, rx = (y0 - ya) * s, (x0 - xa) * s
+                out[..., oy0:oy1, ox0:ox1] = r[..., ry:ry + (oy1 - oy0), rx:rx + (ox1 - ox0)]
+        return out
+
+    def _safe(self, fn, x, down: bool):
+        outs, i = [], 0
+        while i < x.shape[0]:
+            chunk = x[i:i + self.micro]
+            try:
+                y = self._tiled(fn, chunk, down) if self.tile else fn(chunk)
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise
+                _free(x.device)
+                if self.micro > 1:
+                    self.micro //= 2
+                elif self.tile is None:
+                    self.tile = 256
+                elif self.tile > 32:
+                    self.tile //= 2
+                else:
+                    raise
+                continue
+            outs.append(y)
+            i += chunk.shape[0]
+        return torch.cat(outs, 0)
+
+    def down(self, x: torch.Tensor) -> torch.Tensor:
+        return self._safe(self._down_raw, x, True)
+
+    def up(self, x: torch.Tensor) -> torch.Tensor:
+        return self._safe(self._up_raw, x, False)
+
+
+def _free(device):
+    try:
+        if device.type == "mps":
+            torch.mps.empty_cache()
+        elif device.type == "cuda":
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
