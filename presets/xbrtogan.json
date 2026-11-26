@@ -1,0 +1,46 @@
+{
+  "name": "",
+  "lead_in": [
+    {
+      "op": "resize",
+      "method": "bicubic",
+      "width": 60
+    }
+  ],
+  "cycles": {
+    "A": [
+      {
+        "op": "xbr",
+        "scale": 2,
+        "width": null
+      },
+      {
+        "op": "model",
+        "model": "realesr-animevideov3"
+      }
+    ]
+  },
+  "pattern": [
+    "A"
+  ],
+  "iterations": 1,
+  "save_every": 1,
+  "finish": [
+    {
+      "op": "model",
+      "model": "rcugan-x4-dn3"
+    },
+    {
+      "op": "model",
+      "model": "realesr-animevideov3"
+    }
+  ],
+  "rounding": "linear",
+  "light": "linear",
+  "precision": "fp16",
+  "output": {
+    "format": "webp",
+    "quality": 95,
+    "sharp_yuv": true
+  }
+}
