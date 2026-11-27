@@ -65,3 +65,28 @@ def test_run_saves_at_the_finish_size(tmp_path):
     assert Image.open(files[0]).size == (32, 24)
     cat = (tmp_path / "out" / "catalog.csv").read_text()
     assert "32x24" in cat
+
+
+def test_steps_run_in_pieces_with_the_same_result(monkeypatch):
+    import torch
+    import faceloop.engine as eng
+    x = torch.rand(10, 3, 8, 8)
+    calls = []
+
+    def fn(p):
+        calls.append(p.shape[0])
+        if p.shape[0] > 3:
+            raise RuntimeError("MPS backend out of memory (pretend)")
+        return p * 2
+    y = eng._in_pieces(fn, x, 64, "xbr")
+    assert torch.equal(y, x * 2) and calls[0] == 10 and calls[-1] <= 3
+    monkeypatch.setattr(eng, "PIECE_BUDGET", 64 * 3 * 4 * 24 * 4)  # 4 frames per piece
+    calls.clear()
+    assert torch.equal(eng._in_pieces(lambda p: (calls.append(p.shape[0]), p + 1)[1], x, 64, "xbr"), x + 1)
+    assert calls == [4, 4, 2]
+    try:
+        eng._in_pieces(lambda p: (_ for _ in ()).throw(ValueError("other")), x, 64, "xbr")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("other errors pass through")

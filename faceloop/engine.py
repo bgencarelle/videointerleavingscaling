@@ -95,6 +95,50 @@ def _kernel(x: torch.Tensor, target: Size, method: str, ctx: StepContext, **kw) 
     return ctx.resizer.resize(x, target.width, target.height, method, **kw).clamp(0, 1)
 
 
+# A batch is sized for the frames themselves (a few float copies at the
+# biggest size a cycle reaches). xBR and DPID build many more temporary copies
+# than that, so they (and plain resizes, to be safe) go through the batch in
+# pieces small enough for their working memory, and pieces get smaller if the
+# GPU still runs out of memory. Results are the same either way: every frame
+# is processed on its own.
+PIECE_BUDGET = 2 * 1024 ** 3                    # bytes of working memory per piece
+WORK_COPIES = {"xbr": 24, "dpid": 32, "chroma": 8, "resize": 6}
+
+
+def _in_pieces(fn, x: torch.Tensor, work_px: int, kind: str) -> torch.Tensor:
+    n = x.shape[0]
+    per = max(1, min(n, int(PIECE_BUDGET // (max(1, work_px) * 3 * 4 * WORK_COPIES[kind]))))
+    if per >= n:
+        try:
+            return fn(x)
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower() or n == 1:
+                raise
+            _free_gpu(x.device)
+            per = max(1, n // 2)
+    outs, i = [], 0
+    while i < n:
+        try:
+            outs.append(fn(x[i:i + per]))
+            i += per
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower() or per == 1:
+                raise
+            _free_gpu(x.device)
+            per = max(1, per // 2)
+    return torch.cat(outs, 0)
+
+
+def _free_gpu(device):
+    try:
+        if device.type == "mps":
+            torch.mps.empty_cache()
+        elif device.type == "cuda":
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     cur = Size(x.shape[-1], x.shape[-2])
     op = step["op"]
@@ -103,7 +147,10 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
             kw = {"lam": step.get("lambda", 1.0)}
         else:
             kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
-        x = _kernel(x, _target(step, ctx.src, cur, ctx.loop), step["method"], ctx, **kw)
+        t = _target(step, ctx.src, cur, ctx.loop)
+        big = max(cur.width * cur.height, t.width * t.height if t is not None else 0)
+        x = _in_pieces(lambda p: _kernel(p, t, step["method"], ctx, **kw), x, big,
+                       "dpid" if step["method"] == "dpid" else "resize")
     elif op == "model":
         if ctx.models is None:
             raise RecipeError("model step used but no models are available")
@@ -114,7 +161,8 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
             x = _kernel(x, t, "area", ctx)
     elif op == "xbr":
         from .pixelart import xbr
-        x = xbr(x, int(step["scale"])).clamp(0, 1)
+        sc = int(step["scale"])
+        x = _in_pieces(lambda p: xbr(p, sc).clamp(0, 1), x, cur.width * cur.height * sc * sc, "xbr")
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
@@ -127,7 +175,8 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
             x = _kernel(x, t, "area", ctx)
     elif op == "chroma":
         from .chroma import subsample
-        x = subsample(x, step.get("mode", "420"), step.get("matrix", "601"))
+        x = _in_pieces(lambda p: subsample(p, step.get("mode", "420"), step.get("matrix", "601")),
+                       x, cur.width * cur.height, "chroma")
     else:
         raise RecipeError(f"unknown op {op!r}")
     return quantize(x, ctx.rounding, ctx.transfer)

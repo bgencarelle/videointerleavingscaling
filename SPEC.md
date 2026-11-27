@@ -152,6 +152,10 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   image any step produces, using 20% of RAM. Models run in micro-batches,
   falling back to smaller batches and then tiles if the GPU runs out of
   memory.
+- xBR, DPID, chroma and plain resizes go through a batch in pieces sized
+  for their working memory (2 GB per piece; xBR counts ~24 float copies per
+  output pixel, DPID ~32, resizes ~6), halving the piece if the GPU still
+  runs out of memory. Same pixels either way: frames are independent.
 - Each batch runs through the whole pass in memory. Saved loops are written
   as the batch reaches them, then a marker records the batch.
 - Stop or crash: the next run skips finished frames and redoes only the
