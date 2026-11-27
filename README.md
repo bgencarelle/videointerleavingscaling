@@ -189,8 +189,7 @@ The list shows every model id, its factor, and its label (`accuracy` or
 `weights/irn/`. Then run `selftest`, which checks they load and run.
 
 Content-aware and edge-directed methods (no AI): in a resize step, pick
-perceptual, content-adaptive (Kopf), seam carving (shrink) or seam insertion
-(enlarge); the "edge / pixel ×2" step does MMPX, DCCI, NEDI, ICBI or EEDI3
+perceptual or content-adaptive (Kopf); the "edge / pixel ×2" step does MMPX, DCCI, NEDI, ICBI or EEDI3
 at ×2/×4/×8. `faceloop/eedi.py` is a port of GPL-2 code and carries that
 licence. See SPEC.md for what each does and how it was checked.
 

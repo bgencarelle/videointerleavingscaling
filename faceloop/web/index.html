@@ -235,9 +235,8 @@ async function api(path, body) {
 const fileUrl = p => "/api/file?path=" + encodeURIComponent(p);
 
 // ------------------------------------------------------------------ state
-const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid", "perceptual", "kopf", "seam", "seamins"];
-const KERNEL_LABEL = {perceptual: "perceptual (Öztireli)", kopf: "content-adaptive (Kopf)", seam: "seam carving (shrink)",
-                      seamins: "seam insertion (enlarge)"};
+const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid", "perceptual", "kopf"];
+const KERNEL_LABEL = {perceptual: "perceptual (Öztireli)", kopf: "content-adaptive (Kopf)"};
 const EDI = [["mmpx", "MMPX (pixel art)"], ["dcci", "DCCI"], ["nedi", "NEDI"], ["icbi", "ICBI"], ["eedi3", "EEDI3"]];
 const CHROMA = [["420", "4:2:0"], ["422", "4:2:2"], ["411", "4:1:1 (DV)"], ["410", "4:1:0 (YUV9)"]];
 let MODELS = [];
@@ -322,14 +321,10 @@ function stepHTML(s, i, n) {
     else if (s.method === "kopf") f += `
       <label class="muted" title="most refinement rounds; it usually settles before (default 200)">rounds
         <input data-k="iterations" type="number" min="10" max="1000" step="10" style="width:70px" value="${s.iterations ?? 200}"></label>`;
-    else if (["seam", "seamins"].includes(s.method)) f += `
-      <label class="muted" title="what counts as important: backward = the 2007 gradient energy, forward = the 2008 'forward energy' (fewer artefacts)">energy
-        <select data-k="energy"><option value="backward" ${(s.energy || "backward") === "backward" ? "selected" : ""}>backward</option>
-        <option value="forward" ${s.energy === "forward" ? "selected" : ""}>forward</option></select></label>`;
     else if (s.method === "dpid") f += `
       <label class="muted" title="0 = plain box filter; higher keeps small details that stand out (default 1)">detail λ
         <input data-k="lambda" type="number" min="0" max="10" step="0.1" style="width:64px" value="${s.lambda ?? 1}"></label>`;
-    else if (!["nearest", "area", "perceptual", "kopf", "seam", "seamins"].includes(s.method)) f += `
+    else if (!["nearest", "area", "perceptual", "kopf"].includes(s.method)) f += `
       <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
       <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
   } else if (s.op === "model") {
@@ -391,7 +386,6 @@ function renderSteps(el, list) {
       else if (k === "lambda") { const v = parseFloat(inp.value); if (v === 1 || isNaN(v)) delete s.lambda; else s.lambda = v; }
       else if (k === "patch") { if (+inp.value === 2) delete s.patch; else s.patch = +inp.value; }
       else if (k === "iterations") { const v = parseInt(inp.value, 10); if (v === 200 || isNaN(v)) delete s.iterations; else s.iterations = Math.max(10, Math.min(1000, v)); }
-      else if (k === "energy") { if (inp.value === "backward") delete s.energy; else s.energy = "forward"; }
       else if (k === "center") { if (inp.checked) delete s.center; else s.center = false; }
       else s[k] = inp.value;
       if (k === "method" && ["nearest", "area", "dpid"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
@@ -399,8 +393,7 @@ function renderSteps(el, list) {
       if (k === "method" && s.op === "resize") {
         if (s.method !== "perceptual") delete s.patch;
         if (s.method !== "kopf") delete s.iterations;
-        if (!["seam", "seamins"].includes(s.method)) delete s.energy;
-        if (["perceptual", "kopf", "seam", "seamins"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
+        if (["perceptual", "kopf"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
       }
       if (k === "method" && s.op === "edi" && s.method === "mmpx") delete s.center;
       if (k === "method") { render(); return; }

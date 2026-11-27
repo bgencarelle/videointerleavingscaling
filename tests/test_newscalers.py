@@ -59,44 +59,6 @@ def test_perceptual_matches_the_paper():
     assert np.allclose(got, want, atol=1e-5)
 
 
-# ------------------------------------------------------------------ seams
-def test_seam_carving_removes_cheapest_paths():
-    x = _img()
-    y = ca.seam_resize(x, 24, 20)
-    assert y.shape == (1, 3, 20, 24)
-    # every output row's pixels come from the input (no new colours from removal along width)
-    z = ca.seam_resize(x, 24, 24)
-    for r in range(24):
-        row = {tuple(v) for v in x[0, :, r].T.tolist()}
-        assert all(tuple(v) in row for v in z[0, :, r].T.tolist())
-    # a flat background column is the first to go, the edge survives
-    t = torch.zeros(1, 3, 8, 8)
-    t[..., 3] = 1.0
-    t[..., 4] = 0.5
-    u = ca.seam_resize(t, 7, 8)
-    assert (u[..., :, :] == 1.0).any() and (u == 0.5).any()
-
-
-def test_seam_insertion_grows_and_keeps_originals():
-    x = _img()
-    y = ca.seam_resize(x, 40, 30, enlarge=True)
-    assert y.shape == (1, 3, 30, 40)
-    with pytest.raises(ValueError):
-        ca.seam_resize(x, 10, 10, enlarge=True)
-    with pytest.raises(ValueError):
-        ca.seam_resize(x, 40, 30)
-    big = ca.seam_resize(x, 100, 24, enlarge=True)  # more than double: several rounds
-    assert big.shape[-1] == 100
-
-
-def test_seam_direction_is_checked_when_planning():
-    rec = {"lead_in": [{"op": "resize", "method": "area", "width": 32}],
-           "cycles": {"A": [{"op": "resize", "method": "seam", "width": 64}]},
-           "pattern": ["A"], "iterations": 1, "save_every": 1, "finish": []}
-    with pytest.raises(RecipeError):
-        plan_sizes(Recipe.from_dict(rec), Size(64, 48))
-
-
 # ------------------------------------------------------------------ Kopf
 def test_kopf_keeps_flat_colour_and_shapes():
     c = torch.full((2, 3, 16, 20), 0.4)
@@ -165,10 +127,17 @@ def test_eedi3_rows_shape_and_flat():
 
 
 # ------------------------------------------------------------------ in a pass
+def test_seam_methods_are_gone():
+    rec = {"lead_in": [{"op": "resize", "method": "area", "width": 32}],
+           "cycles": {"A": [{"op": "resize", "method": "seam", "width": 16}]},
+           "pattern": ["A"], "iterations": 1, "save_every": 1, "finish": []}
+    with pytest.raises(RecipeError):
+        Recipe.from_dict(rec)
+
+
 @pytest.mark.parametrize("cycle", [
     [{"op": "resize", "method": "perceptual", "width": 16}, {"op": "edi", "method": "dcci", "scale": 2}],
     [{"op": "resize", "method": "kopf", "width": 8, "iterations": 20}, {"op": "edi", "method": "nedi", "scale": 4}],
-    [{"op": "resize", "method": "seam", "width": 24}, {"op": "resize", "method": "seamins", "width": "loop", "energy": "forward"}],
     [{"op": "edi", "method": "mmpx", "scale": 2, "width": 32}],
     [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "icbi", "scale": 2, "center": False}],
     [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "eedi3", "scale": 2}],

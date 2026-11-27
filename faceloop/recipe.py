@@ -55,9 +55,8 @@ from typing import Any
 ENGINE_PIXELS_VERSION = 5
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
-                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid", "perceptual": "perc", "kopf": "kopf",
-                "seam": "seam", "seamins": "seamI"}
-CONTENT_AWARE = ("perceptual", "kopf", "seam", "seamins")
+                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid", "perceptual": "perc", "kopf": "kopf"}
+CONTENT_AWARE = ("perceptual", "kopf")
 
 
 
@@ -192,8 +191,6 @@ class Recipe:
                     it = s.get("iterations", 200)
                     if not isinstance(it, int) or not (10 <= it <= 1000):
                         raise RecipeError(f"{where}: Kopf iterations must be 10 to 1000")
-                if s.get("method") in ("seam", "seamins") and s.get("energy", "backward") not in ("backward", "forward"):
-                    raise RecipeError(f"{where}: seam energy must be 'backward' or 'forward'")
                 if s.get("method") == "dpid":
                     lam = s.get("lambda", 1.0)
                     if not isinstance(lam, (int, float)) or not (0 <= lam <= 10):
@@ -329,8 +326,6 @@ def _step_slug(s: dict) -> str:
             m += f"p{s['patch']}"
         if s["method"] == "kopf" and s.get("iterations", 200) != 200:
             m += f"i{s['iterations']}"
-        if s["method"] in ("seam", "seamins") and s.get("energy", "backward") == "forward":
-            m += "F"
         if s.get("antialias") is False:
             m += "NA"
         if s.get("fixed_point"):

@@ -1,19 +1,11 @@
-"""Content-aware resizing: perceptual downscaling, seam carving and
-content-adaptive downscaling. All work on (N,3,H,W) float frames on any
+"""Content-aware downscaling: perceptual downscaling and content-adaptive
+downscaling. All work on (N,3,H,W) float frames on any
 device, frames independent.
 
 perceptual   Öztireli & Gross, "Perceptually Based Downscaling of Images",
              SIGGRAPH 2015, Algorithm 1 (appendix B). For whole-number
              factors it is exactly their algorithm; other factors use the
              same box (area) average for its first two lines.
-seam         Avidan & Shamir, "Seam Carving for Content-Aware Image
-             Resizing", SIGGRAPH 2007: remove the lowest-energy seams (width
-             first, then height). "forward" energy is Rubinstein, Shamir &
-             Avidan 2008.
-seamins      the same paper's enlarging: find the k seams removal would take
-             first, then duplicate them (each new pixel the average of the
-             seam pixel and its right/lower neighbour). At most half the
-             width is added per round; bigger enlargements take rounds.
 kopf         Kopf, Shamir & Peers, "Content-Adaptive Image Downscaling",
              SIGGRAPH Asia 2013, following their supplementary pseudocode:
              one bilateral kernel per output pixel (spatial Gaussian x
@@ -48,117 +40,6 @@ def perceptual(x: torch.Tensor, width: int, height: int, area, patch: int = 2, e
     Mf = full(M)
     Rf = full(R)
     return (Mf + Rf * L - T) / N
-
-
-# ===================================================================== seams
-def _gray(x: torch.Tensor) -> torch.Tensor:
-    return (0.299 * x[:, 0] + 0.587 * x[:, 1] + 0.114 * x[:, 2]) * 255.0  # (N,H,W)
-
-
-def _backward_energy(x: torch.Tensor) -> torch.Tensor:
-    """|dI/dx| + |dI/dy| summed over the colour channels (0..255 scale)."""
-    p = F.pad(x * 255.0, (1, 1, 1, 1), mode="replicate")
-    dx = (p[:, :, 1:-1, 2:] - p[:, :, 1:-1, :-2]).abs() * 0.5
-    dy = (p[:, :, 2:, 1:-1] - p[:, :, :-2, 1:-1]).abs() * 0.5
-    return (dx + dy).sum(1)  # (N,H,W)
-
-
-def _find_seams(x: torch.Tensor, energy: str) -> torch.Tensor:
-    """Column of the cheapest vertical seam in every row: (N,H) long."""
-    n, _, h, w = x.shape
-    inf = torch.tensor(float("inf"), device=x.device)
-    back = torch.empty((n, h, w), dtype=torch.int8, device=x.device)
-    if energy == "forward":
-        g = F.pad(_gray(x), (1, 1, 0, 0), mode="replicate")  # (N,H,W+2)
-        cu = (g[:, :, 2:] - g[:, :, :-2]).abs()             # |I(y,x+1) - I(y,x-1)|
-        up = F.pad(g[:, :-1, 1:-1], (0, 0, 1, 0), mode="replicate")  # I(y-1,x)
-        cl = cu + (up - g[:, :, :-2]).abs()
-        cr = cu + (up - g[:, :, 2:]).abs()
-        m = cu[:, 0].clone()
-        for y in range(1, h):
-            left = torch.cat([inf.expand(n, 1), m[:, :-1]], 1) + cl[:, y]
-            mid = m + cu[:, y]
-            right = torch.cat([m[:, 1:], inf.expand(n, 1)], 1) + cr[:, y]
-            stack = torch.stack([left, mid, right], -1)
-            m, arg = stack.min(-1)
-            back[:, y] = (arg - 1).to(torch.int8)
-    else:
-        e = _backward_energy(x)
-        m = e[:, 0].clone()
-        for y in range(1, h):
-            left = torch.cat([inf.expand(n, 1), m[:, :-1]], 1)
-            right = torch.cat([m[:, 1:], inf.expand(n, 1)], 1)
-            stack = torch.stack([left, m, right], -1)
-            best, arg = stack.min(-1)
-            m = best + e[:, y]
-            back[:, y] = (arg - 1).to(torch.int8)
-    seam = torch.empty((n, h), dtype=torch.long, device=x.device)
-    seam[:, h - 1] = m.argmin(-1)
-    for y in range(h - 1, 0, -1):
-        seam[:, y - 1] = seam[:, y] + back[:, y].gather(1, seam[:, y:y + 1]).squeeze(1).long()
-    return seam
-
-
-def _remove(t: torch.Tensor, seam: torch.Tensor) -> torch.Tensor:
-    """Drop one pixel per row: t (N,C,H,W) -> (N,C,H,W-1)."""
-    n, c, h, w = t.shape
-    idx = torch.arange(w - 1, device=t.device).view(1, 1, w - 1)
-    idx = idx + (idx >= seam.unsqueeze(-1)).long()                            # skip the seam column
-    return t.gather(3, idx.unsqueeze(1).expand(n, c, h, w - 1))
-
-
-def _carve_width(x: torch.Tensor, new_w: int, energy: str, check=None) -> torch.Tensor:
-    while x.shape[3] > new_w:
-        if check:
-            check()
-        x = _remove(x, _find_seams(x, energy))
-    return x
-
-
-def _insert_width(x: torch.Tensor, new_w: int, energy: str, mix, check=None) -> torch.Tensor:
-    while x.shape[3] < new_w:
-        n, c, h, w = x.shape
-        k = min(new_w - w, max(1, w // 2))
-        # the k seams removal would take first, in the original's columns
-        orig = torch.arange(w, device=x.device).view(1, 1, 1, w).expand(n, 1, h, w).float()
-        cur = torch.cat([x, orig], 1)
-        chosen = torch.zeros((n, h, w), dtype=torch.bool, device=x.device)
-        for _ in range(k):
-            if check:
-                check()
-            seam = _find_seams(cur[:, :c], energy)
-            col = cur[:, c].gather(2, seam.unsqueeze(-1)).squeeze(-1).long()  # original column per row
-            chosen.scatter_(2, col.unsqueeze(-1), True)
-            cur = _remove(cur, seam)
-        # duplicate the chosen columns: the copy is the average with the right neighbour
-        right = torch.cat([x[..., 1:], x[..., -1:]], 3)
-        extra = mix(x, right)
-        dup = chosen.long()
-        pos = torch.cumsum(1 + dup, 2) - 1 - dup          # where each original pixel lands
-        out = torch.empty((n, c, h, w + k), dtype=x.dtype, device=x.device)
-        out.scatter_(3, pos.unsqueeze(1).expand(n, c, h, w), x)
-        ins = (pos + 1).clamp(max=w + k - 1)
-        src = torch.where(chosen.unsqueeze(1), extra, out.gather(3, ins.unsqueeze(1).expand(n, c, h, w)))
-        out.scatter_(3, ins.unsqueeze(1).expand(n, c, h, w), src)
-        x = out
-    return x
-
-
-def seam_resize(x: torch.Tensor, width: int, height: int, energy: str = "backward", enlarge: bool = False,
-                mix=None, check=None) -> torch.Tensor:
-    """Seam carving (enlarge=False: shrink only) or seam insertion
-    (enlarge=True: grow only), width first, then height."""
-    mix = mix or (lambda a, b: (a + b) * 0.5)
-    h0, w0 = x.shape[-2:]
-    if enlarge:
-        if width < w0 or height < h0:
-            raise ValueError("seam insertion only enlarges")
-        x = _insert_width(x, width, energy, mix, check)
-        return _insert_width(x.transpose(2, 3), height, energy, mix, check).transpose(2, 3)
-    if width > w0 or height > h0:
-        raise ValueError("seam carving only shrinks")
-    x = _carve_width(x, width, energy, check)
-    return _carve_width(x.transpose(2, 3), height, energy, check).transpose(2, 3)
 
 
 # ===================================================================== Kopf 2013

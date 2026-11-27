@@ -93,17 +93,6 @@ def _kernel(x: torch.Tensor, target: Size, method: str, ctx: StepContext, **kw) 
         from .contentaware import kopf
         y = kopf(ctx.transfer.decode(x), target.width, target.height, int(kw.get("iterations", 200)), check=ctx.check)
         return ctx.transfer.encode(y.clamp(0, 1))
-    if method in ("seam", "seamins"):
-        from .contentaware import seam_resize
-        if ctx.light == "linear":
-            mix = lambda a, b: ctx.transfer.encode((ctx.transfer.decode(a) + ctx.transfer.decode(b)) * 0.5)
-        else:
-            mix = None
-        try:
-            return seam_resize(x, target.width, target.height, kw.get("energy", "backward"),
-                               enlarge=method == "seamins", mix=mix, check=ctx.check)
-        except ValueError as e:
-            raise RecipeError(str(e)) from None
     if method == "dpid":
         from .dpid import dpid
         lam = float(kw.get("lam", 1.0))
@@ -124,8 +113,8 @@ def _kernel(x: torch.Tensor, target: Size, method: str, ctx: StepContext, **kw) 
 # GPU still runs out of memory. Results are the same either way: every frame
 # is processed on its own.
 PIECE_BUDGET = 2 * 1024 ** 3                    # bytes of working memory per piece
-WORK_COPIES = {"xbr": 24, "dpid": 32, "chroma": 8, "resize": 6, "perceptual": 10, "kopf": 120, "seam": 12,
-               "seamins": 16, "edi_mmpx": 40, "edi_dcci": 40, "edi_nedi": 90, "edi_icbi": 60, "edi_eedi3": 220}
+WORK_COPIES = {"xbr": 24, "dpid": 32, "chroma": 8, "resize": 6, "perceptual": 10, "kopf": 120,
+               "edi_mmpx": 40, "edi_dcci": 40, "edi_nedi": 90, "edi_icbi": 60, "edi_eedi3": 220}
 
 
 def _in_pieces(fn, x: torch.Tensor, work_px: int, kind: str) -> torch.Tensor:
@@ -168,8 +157,8 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
     if op == "resize":
         if step["method"] == "dpid":
             kw = {"lam": step.get("lambda", 1.0)}
-        elif step["method"] in ("perceptual", "kopf", "seam", "seamins"):
-            kw = {k: step[k] for k in ("patch", "iterations", "energy") if k in step}
+        elif step["method"] in ("perceptual", "kopf"):
+            kw = {k: step[k] for k in ("patch", "iterations") if k in step}
         else:
             kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
         t = _target(step, ctx.src, cur, ctx.loop)
@@ -543,13 +532,6 @@ def step_size(st: dict, cur: Size, src: Size, loop: Size | None, scale_of) -> tu
         raw = ([-(-cur.width // k), -(-cur.height // k)] if st.get("direction") == "down"
                else [cur.width * k, cur.height * k])
         return (tgt or Size(*raw)), raw, True
-    if op == "resize" and tgt is not None and st.get("method") in ("seam", "seamins"):
-        grow = tgt.width > cur.width or tgt.height > cur.height
-        shrink = tgt.width < cur.width or tgt.height < cur.height
-        if st["method"] == "seam" and grow:
-            raise RecipeError(f"seam carving only shrinks ({cur} -> {tgt}); use seam insertion to enlarge")
-        if st["method"] == "seamins" and shrink:
-            raise RecipeError(f"seam insertion only enlarges ({cur} -> {tgt}); use seam carving to shrink")
     if op in ("model", "xbr", "edi"):
         k = scale_of(st)
         if not k:
