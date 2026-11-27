@@ -74,6 +74,129 @@ class JsonFile:
 
 
 # ----------------------------------------------------------------- queue
+class Logbook:
+    """Everything worth sending when something goes wrong, in one place for
+    the Log tab: pass log lines, estimates, full errors, and anything
+    printed to the terminal. Kept in state/log.txt (trimmed as it grows)."""
+
+    KEEP = 4000          # lines shown / kept after trimming
+    TRIM_AT = 3_000_000  # bytes
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+
+    def add(self, text: str, who: str = "") -> None:
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        out = []
+        for line in str(text).rstrip("\n").split("\n"):
+            line = line.split("\r")[-1].rstrip()
+            if not line:
+                continue
+            m = re.match(r"\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] (.*)", line)
+            ts, msg = (m.group(1), m.group(2)) if m else (stamp, line)
+            out.append(f"[{ts}] {who + ' · ' if who else ''}{msg}")
+        if not out:
+            return
+        with self.lock:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write("\n".join(out) + "\n")
+                if self.path.stat().st_size > self.TRIM_AT:
+                    keep = self.path.read_text(encoding="utf-8", errors="replace").splitlines()[-self.KEEP:]
+                    self.path.write_text("\n".join(keep) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+
+    def text(self, last: int | None = None) -> str:
+        with self.lock:
+            try:
+                lines = self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                return ""
+        return "\n".join(lines[-(last or self.KEEP):])
+
+    def clear(self) -> None:
+        with self.lock:
+            try:
+                self.path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
+
+
+class _Tee:
+    """Copies what's written to the terminal into the logbook, line by line."""
+
+    def __init__(self, stream, book: Logbook, who: str):
+        self.stream, self.book, self.who, self.buf = stream, book, who, ""
+
+    def write(self, data):
+        try:
+            self.stream.write(data)
+        except Exception:  # noqa: BLE001
+            pass
+        self.buf += data
+        if "\n" in self.buf:
+            done, self.buf = self.buf.rsplit("\n", 1)
+            self.book.add(done, self.who)
+        return len(data)
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def environment() -> str:
+    """One block describing this Mac and the software, for bug reports."""
+    import os
+    import sys
+    from . import __version__
+    rows = [f"faceloop {__version__}"]
+    try:
+        commit = subprocess.run(["git", "-C", str(REPO), "log", "-1", "--format=%h %s"],
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+        if commit:
+            rows.append(f"git: {commit}")
+    except Exception:  # noqa: BLE001
+        pass
+    mac = platform.mac_ver()[0]
+    rows.append(f"system: {'macOS ' + mac if mac else platform.platform()}, {platform.machine()}, "
+                f"Python {sys.version.split()[0]}")
+    try:
+        chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+        if chip:
+            rows.append(f"chip: {chip}, {os.cpu_count()} cores")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .engine import total_ram_bytes
+        rows.append(f"memory: {total_ram_bytes() / 1024 ** 3:.0f} GB")
+    except Exception:  # noqa: BLE001
+        pass
+    vers = [f"torch {torch.__version__}"]
+    for mod in ("coremltools", "spandrel", "numpy", "PIL"):
+        try:
+            vers.append(f"{mod} {__import__(mod).__version__}")
+        except Exception:  # noqa: BLE001
+            vers.append(f"{mod} -")
+    rows.append("packages: " + ", ".join(vers))
+    try:
+        from .imageio import webp_backend
+        rows.append(f"webp: {webp_backend()[1]}")
+    except Exception:  # noqa: BLE001
+        pass
+    d = THROTTLE.describe()
+    rows.append(f"leave for the Mac: {d.get('level', '?')}" + (f", {d['memory']}" if d.get("memory") else ""))
+    return "\n".join(rows)
+
+
 class Queue:
     """Jobs run one after another. Finished frames are skipped on resume,
     so a job that was running when the app quit simply continues."""
@@ -188,24 +311,35 @@ class Queue:
                 self.current, self.controls, self.progress = job, ctl, prog
                 job["status"], job["started"], job["message"] = "running", _now(), ""
                 self._save()
+            book = self.app.logbook
+            who = (job.get("recipe") or {}).get("slug") or job.get("slug") or "pass"
+            book.add(f"pass started: {job['source']} -> {job['out']}", who)
+            book.add("recipe: " + json.dumps(job["recipe"], separators=(",", ":")), who)
+
+            def on_line(line, j=job, who=who):
+                j["message"] = line.split("] ", 1)[-1]
+                book.add(line, who)
             try:
                 recipe = Recipe.from_dict(job["recipe"])
                 res = run_pass(recipe, Path(job["source"]), Path(job["out"]), models=self.app.models,
                                device=self.app.device, progress=prog, controls=ctl,
-                               gpu_lock=self.app.gpu_lock,
-                               log=lambda line, j=job: j.__setitem__("message", line.split("] ", 1)[-1]))
+                               gpu_lock=self.app.gpu_lock, log=on_line)
                 with self.lock:
                     job["folder"] = str(res.folder)
                     job["status"] = "stopped" if res.stopped else "done"
                     job["message"] = ("stopped; requeue to continue" if res.stopped
                                       else f"done in {_fmt_secs(res.seconds)}")
+                book.add(job["message"], who)
             except StopRequested:
                 with self.lock:
                     job["status"], job["message"] = "stopped", "stopped; requeue to continue"
+                book.add("stopped", who)
             except Exception as e:  # noqa: BLE001
                 with self.lock:
                     job["status"], job["message"] = "failed", f"{type(e).__name__}: {e}"
-                traceback.print_exc()
+                book.add("FAILED: " + traceback.format_exc(), who)
+                if not getattr(self.app, "tee", False):
+                    traceback.print_exc()
             finally:
                 with self.lock:
                     job["finished"] = _now()
@@ -220,6 +354,8 @@ class App:
         self.state_dir = Path(state_dir or REPO / "state")
         self.presets_dir = Path(presets_dir or REPO / "presets")
         self.models = ModelManager()
+        self.logbook = Logbook(self.state_dir / "log.txt")
+        self.tee = False  # set by serve(): terminal output also goes to the logbook
         self.device = device or pick_device()
         self.gpu_lock = threading.Lock()
         self.settings = JsonFile(self.state_dir / "settings.json", {"source": "", "out": "", "outs": []})
@@ -361,6 +497,10 @@ class App:
                 return True
             return est["cancel"]
 
+        book = self.logbook
+        book.add(f"estimate started: {src}", "estimate")
+        book.add("recipe: " + json.dumps(body["recipe"], separators=(",", ":")), "estimate")
+
         def work():
             try:
                 with self.gpu_lock:
@@ -377,11 +517,24 @@ class App:
                 gb = res["est_bytes"] / 1024 ** 3
                 res["disk_text"] = f"{gb:.1f} GB" if gb >= 1 else f"{res['est_bytes'] / 1024 ** 2:.0f} MB"
                 est["result"], est["status"] = res, "done"
+                book.add(f"estimate: source {res['size']}, loop {res['loop']}, {res['sec_per_frame_cycle'] * 1000:.1f} ms "
+                         f"per frame per cycle, finish {res['sec_per_frame_finish'] * 1000:.1f} ms, batches of "
+                         f"{res['batch_size']} (chunks of {res['chunk']}), models in {res['precision']}: pass "
+                         f"{res['est_text']}, disk {res['disk_text']}, saved at {res.get('saved_size', '')}",
+                         "estimate")
+                for n in res.get("notes", []):
+                    book.add(n, "estimate")
+                for st in res.get("steps", []):
+                    book.add(f"  {st.get('where', '')} {st.get('step', '')}: {st.get('ms', 0):.2f} ms/frame",
+                             "estimate")
             except EstimateCancelled:
                 est["status"] = "failed" if est["error"] else "cancelled"
+                book.add(est["error"] or "cancelled", "estimate")
             except Exception as e:  # noqa: BLE001
                 est["status"], est["error"] = "failed", f"{type(e).__name__}: {e}"
-                traceback.print_exc()
+                book.add("FAILED: " + traceback.format_exc(), "estimate")
+                if not self.tee:
+                    traceback.print_exc()
             finally:
                 try:
                     if self.device.type == "mps":
@@ -391,6 +544,18 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
         return {"id": eid}
+
+    def api_log(self, q):
+        last = int(q.get("lines", ["0"])[0] or 0) or None
+        now = time.time()
+        if now - getattr(self, "_env_at", 0) > 30:  # git and sysctl calls: not every refresh
+            self._env, self._env_at = environment(), now
+        return {"env": self._env, "text": self.logbook.text(last)}
+
+    def api_log_clear(self, body):
+        self.logbook.clear()
+        self.logbook.add("log cleared")
+        return {"ok": True}
 
     def api_estimate_status(self, q):
         eid = q.get("id", [""])[0]
@@ -544,14 +709,15 @@ def _safe_name(s: str) -> str:
 # ----------------------------------------------------------------- http
 GET_ROUTES = {"/api/models": "api_models", "/api/settings": "api_settings", "/api/queue": "api_queue",
               "/api/presets": "api_presets", "/api/results": "api_results",
-              "/api/estimate/status": "api_estimate_status", "/api/recent": "api_recent"}
+              "/api/estimate/status": "api_estimate_status", "/api/recent": "api_recent",
+              "/api/log": "api_log"}
 POST_ROUTES = {"/api/pick_folder": "api_pick_folder", "/api/source": "api_source",
                "/api/preview": "api_preview", "/api/estimate/start": "api_estimate_start",
                "/api/estimate/cancel": "api_estimate_cancel", "/api/recent/load": "api_recent_load",
                "/api/throttle": "api_throttle",
                "/api/queue/add": "api_queue_add", "/api/queue/action": "api_queue_action",
                "/api/presets/load": "api_preset_load", "/api/presets/save": "api_preset_save",
-               "/api/presets/delete": "api_preset_delete"}
+               "/api/presets/delete": "api_preset_delete", "/api/log/clear": "api_log_clear"}
 
 
 def make_handler(app: App, port: int):
@@ -583,7 +749,9 @@ def make_handler(app: App, port: int):
             except (RecipeError, ValueError, KeyError, FileNotFoundError) as e:
                 self._json(400, {"error": str(e)})
             except Exception as e:  # noqa: BLE001
-                traceback.print_exc()
+                app.logbook.add(f"FAILED in {name}: " + traceback.format_exc(), "gui")
+                if not app.tee:
+                    traceback.print_exc()
                 self._json(500, {"error": f"{type(e).__name__}: {e}"})
 
         def do_GET(self):
@@ -622,6 +790,12 @@ def make_handler(app: App, port: int):
 
 def serve(port: int = 8765, open_browser: bool = True, app: App | None = None):
     app = app or App()
+    import sys
+    if not app.tee:  # terminal output (warnings, errors) also goes to the Log tab
+        sys.stdout = _Tee(sys.stdout, app.logbook, "terminal")
+        sys.stderr = _Tee(sys.stderr, app.logbook, "terminal")
+        app.tee = True
+    app.logbook.add("GUI started\n" + environment(), "gui")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
     url = f"http://127.0.0.1:{port}/"
     print(f"faceloop GUI on {url}  (device {app.device}; Ctrl-C to quit)")

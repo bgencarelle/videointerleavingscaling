@@ -42,6 +42,11 @@ passes are still there next time.
     tweak.
   - The saved-loop buttons (c25 ▸, c200 ▸, ...) make that loop the source of
     a new pass, so passes chain.
+- **Log:** everything in one place: each pass's log lines and recipe,
+  estimates with their timings, full errors, and anything printed in the
+  terminal, kept in `state/log.txt`. "Copy latest" copies this Mac's setup
+  plus everything since the last pass or estimate started, ready to paste
+  when asking for help; "only errors and warnings" filters it.
   - A chained pass is filed under where it came from, e.g.
     `BG_faceSource+8ba5c0200/...`, and its contact sheets use the same
     frames as the original source.

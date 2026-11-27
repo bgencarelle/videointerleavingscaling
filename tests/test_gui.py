@@ -135,6 +135,25 @@ def test_estimate_queue_results_and_files(server):
     call("/api/queue/action", {"id": job["id"], "action": "requeue"})
     j = _wait(call, job["id"], {"done", "failed"})
     assert j["status"] == "done"
+    # the Log tab has the estimate, the pass and this machine
+    log = call("/api/log")
+    assert "packages: torch" in log["env"]
+    assert "estimate · estimate started" in log["text"] and "ms per frame per cycle" in log["text"]
+    assert "pass started" in log["text"] and "recipe: {" in log["text"] and "done in" in log["text"]
+
+
+def test_failures_land_in_the_log(server, monkeypatch):
+    call, src, out, app = server
+    import faceloop.gui as gui
+
+    def boom(*a, **k):
+        raise RuntimeError("MPS backend out of memory (pretend)")
+    monkeypatch.setattr(gui, "run_pass", boom)
+    job = call("/api/queue/add", {"recipe": RECIPE, "source": str(src), "out": str(out)})
+    j = _wait(call, job["id"], {"done", "failed"})
+    assert j["status"] == "failed"
+    text = call("/api/log")["text"]
+    assert "FAILED: Traceback" in text and "out of memory (pretend)" in text and 'File "' in text
 
 
 def test_pause_stop_continue(server):
@@ -188,3 +207,27 @@ def test_reserve_setting(server):
             call("/api/throttle", {"level": "99"})
     finally:
         THROTTLE.set("off")
+
+
+def test_logbook_collects_and_trims(tmp_path):
+    from faceloop.gui import Logbook, _Tee, environment
+    import io
+    b = Logbook(tmp_path / "log.txt")
+    b.add("[2026-01-02 03:04:05] batch 1 done", "pass")
+    b.add("line one\nline two\r50%\r100%\n", "terminal")
+    t = b.text()
+    assert "[2026-01-02 03:04:05] pass · batch 1 done" in t
+    assert "terminal · line two" not in t and "terminal · 100%" in t and "terminal · line one" in t
+    out = io.StringIO()
+    tee = _Tee(out, b, "terminal")
+    tee.write("partial ")
+    tee.write("warning here\nnext")
+    assert out.getvalue() == "partial warning here\nnext"
+    assert "terminal · partial warning here" in b.text() and "next" not in b.text().splitlines()[-1]
+    b.TRIM_AT, b.KEEP = 2000, 10
+    for i in range(200):
+        b.add(f"filler {i}")
+    assert len(b.text().splitlines()) <= 60
+    assert "packages: torch" in environment()
+    b.clear()
+    assert b.text() == ""

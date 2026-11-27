@@ -86,6 +86,7 @@
     <button data-tab="build" class="on">Build</button>
     <button data-tab="queue">Queue <span id="qcount" class="badge"></span></button>
     <button data-tab="results">Results</button>
+    <button data-tab="log">Log</button>
   </nav>
   <span class="dev" id="dev"></span>
 </header>
@@ -186,6 +187,21 @@
    <h2>Queue <small class="muted">runs one pass after another; finished frames are skipped when a pass continues</small></h2>
    <table><thead><tr><th>Pass</th><th>Source → output</th><th>Status</th><th>Progress</th><th></th></tr></thead>
    <tbody id="qbody"></tbody></table>
+  </section>
+</div>
+
+<!-- ============================================================ LOG -->
+<div class="tab" id="tab-log">
+  <section>
+   <h2>Log <small class="muted">passes, estimates, full errors and terminal output; copy and paste it when asking for help</small></h2>
+   <div class="row">
+     <button id="logCopyLast">Copy latest</button>
+     <button id="logCopyAll">Copy all</button>
+     <label class="muted"><input type="checkbox" id="logErrors"> only errors and warnings</label>
+     <button class="small" id="logClear" style="margin-left:auto">Clear</button>
+     <span class="muted" id="logNote"></span></div>
+   <div class="muted" style="margin:4px 0 8px">“Copy latest” copies this Mac's setup and everything since the last pass or estimate started.</div>
+   <pre id="logText" style="font-family:var(--mono);font-size:11px;line-height:1.35;background:#0b0b0b;border:1px solid var(--line);border-radius:6px;padding:10px;max-height:70vh;overflow:auto;white-space:pre-wrap;margin:0"></pre>
   </section>
 </div>
 
@@ -615,8 +631,10 @@ async function estimateAndQueue() {
   d.oncancel = null;
   if (st.status === "failed") {
     $("#dlgTitle").textContent = "Couldn't estimate";
-    $("#dlgBody").innerHTML = `<div class="err">${esc(st.error)}</div><div class="row" style="margin-top:10px">${noEst}</div>`;
+    $("#dlgBody").innerHTML = `<div class="err">${esc(st.error)}</div><div class="row" style="margin-top:10px">${noEst}
+      <button id="dlgLog">Show the log</button></div>`;
     $("#dlgNoEst").onclick = () => { d.close(); queueIt(null); };
+    $("#dlgLog").onclick = () => { d.close(); showTab("log"); };
     $("#dlgCancel").onclick = () => d.close();
     return;
   }
@@ -669,6 +687,7 @@ async function loadQueue() {
     else if (j.status === "paused") b = btn("resume", "Resume") + btn("stop", "Stop");
     else {
       if (["stopped", "failed", "done"].includes(j.status)) b += btn("requeue", j.status === "done" ? "Run again" : "Continue");
+      if (j.status === "failed") b += `<button class="small" data-showlog="1">Log</button>`;
       b += btn("up", "↑") + btn("down", "↓") + btn("remove", "Remove");
     }
     return `<tr><td><div class="slug" style="font-family:var(--mono);font-size:12px">${esc(j.name ? j.name + " · " : "")}${esc(j.slug)}</div><div class="muted">${j.iterations} cycles · added ${esc(j.created)}</div></td>
@@ -676,6 +695,7 @@ async function loadQueue() {
       <td class="st-${j.status}"><b>${j.status}</b><div class="muted">${esc(j.message)}</div></td>
       <td>${bar}</td><td style="white-space:nowrap">${b}</td></tr>`;
   }).join("") || `<tr><td colspan="5" class="muted">Nothing queued. Build a pass and press “Estimate & queue…”.</td></tr>`;
+  document.querySelectorAll("[data-showlog]").forEach(x => x.onclick = () => showTab("log"));
   document.querySelectorAll("[data-q]").forEach(x => x.onclick = async () => {
     if (x.dataset.q === "remove" && !confirm("Remove this job from the queue? (Its files stay.)")) return;
     try { await api("/api/queue/action", {id: x.dataset.id, action: x.dataset.q}); } catch (e) { alert(e.message); }
@@ -712,21 +732,61 @@ function renderResults() {
   document.querySelectorAll("[data-src]").forEach(b => b.onclick = () => { $("#src").value = b.dataset.src; showTab("build"); loadSource(); });
 }
 
+// ------------------------------------------------------------------ log tab
+let LOG = {env: "", text: ""}, logTimer = null;
+const ERRLINE = /error|failed|traceback|exception|warning|out of memory|couldn't|not used|File "/i;
+function logLines() {
+  const lines = LOG.text.split("\n");
+  return $("#logErrors").checked ? lines.filter(l => ERRLINE.test(l)) : lines;
+}
+async function loadLog() {
+  try { LOG = await api("/api/log"); } catch (e) { $("#logNote").textContent = e.message; return; }
+  const pre = $("#logText");
+  const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  pre.textContent = LOG.env + "\n" + "-".repeat(60) + "\n" + logLines().join("\n");
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+function latestLines() {
+  const lines = LOG.text.split("\n");
+  let i = lines.length - 1;
+  while (i > 0 && !/ · (pass started|estimate started)/.test(lines[i])) i--;
+  const out = lines.slice(Math.max(0, i));
+  return $("#logErrors").checked ? out.filter(l => ERRLINE.test(l) || / · (pass|estimate) started| · recipe: /.test(l)) : out;
+}
+async function copyText(t) {
+  try { await navigator.clipboard.writeText(t); }
+  catch (e) {  // older browsers: select and copy
+    const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  $("#logNote").textContent = `copied ${t.split("\n").length} lines`;
+  setTimeout(() => $("#logNote").textContent = "", 3000);
+}
+function bindLog() {
+  $("#logCopyAll").onclick = async () => { await loadLog(); copyText(LOG.env + "\n\n" + logLines().join("\n")); };
+  $("#logCopyLast").onclick = async () => { await loadLog(); copyText(LOG.env + "\n\n" + latestLines().join("\n")); };
+  $("#logErrors").onchange = loadLog;
+  $("#logClear").onclick = async () => { if (!confirm("Clear the log?")) return; await api("/api/log/clear", {}); loadLog(); };
+}
+
 // ------------------------------------------------------------------ tabs + start
 function showTab(t) {
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("on", x.id === "tab-" + t));
   document.querySelectorAll("header nav button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
-  clearInterval(qTimer);
+  clearInterval(qTimer); clearInterval(logTimer);
   if (t === "queue") { loadQueue(); qTimer = setInterval(loadQueue, 1500); }
+  if (t === "log") { loadLog().then(() => { const p = $("#logText"); p.scrollTop = p.scrollHeight; }); logTimer = setInterval(loadLog, 2000); }
   if (t === "results") { if (!$("#resOut").value) $("#resOut").value = $("#out").value; loadResults(); }
 }
 
 (async function start() {
-  bind();
+  bind(); bindLog();
   const m = await api("/api/models"); MODELS = m.models; $("#dev").textContent = "device: " + m.device;
   const s = await api("/api/settings");
   $("#src").value = s.source || ""; $("#out").value = s.out || ""; $("#resOut").value = s.out || "";
   render(); loadPresets(); loadRecent();
+  const h = location.hash.slice(1);
+  if (["build", "queue", "results", "log"].includes(h)) showTab(h);
   if (s.source) loadSource();
   setInterval(async () => { try { const r = await api("/api/queue"); $("#qcount").textContent = r.jobs.filter(j => ["queued","running","paused"].includes(j.status)).length || ""; } catch (e) {} }, 5000);
 })();

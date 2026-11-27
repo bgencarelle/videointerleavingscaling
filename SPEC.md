@@ -245,6 +245,12 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
    contact sheets, the last saved frame, a filter, a card size, and "Load
    into Build". Each saved loop has a button that makes it the source of a
    new pass (chaining).
+5. **Log:** pass log lines (with the pass's slug and recipe), estimates
+   (result, engine notes, per-step times), full tracebacks of failures, and
+   terminal output, kept in `state/log.txt` (trimmed past 3 MB), with an
+   environment block (git commit, macOS, chip, memory, package versions,
+   WebP, "Leave for the Mac"). Copy latest / Copy all / errors-only filter.
+   A failed pass and a failed estimate link to it.
 
 ## Chaining passes
 
