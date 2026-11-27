@@ -235,7 +235,10 @@ async function api(path, body) {
 const fileUrl = p => "/api/file?path=" + encodeURIComponent(p);
 
 // ------------------------------------------------------------------ state
-const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid"];
+const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid", "perceptual", "kopf", "seam", "seamins"];
+const KERNEL_LABEL = {perceptual: "perceptual (Öztireli)", kopf: "content-adaptive (Kopf)", seam: "seam carving (shrink)",
+                      seamins: "seam insertion (enlarge)"};
+const EDI = [["mmpx", "MMPX (pixel art)"], ["dcci", "DCCI"], ["nedi", "NEDI"], ["icbi", "ICBI"], ["eedi3", "EEDI3"]];
 const CHROMA = [["420", "4:2:0"], ["422", "4:2:2"], ["411", "4:1:1 (DV)"], ["410", "4:1:0 (YUV9)"]];
 let MODELS = [];
 let state = {
@@ -258,6 +261,7 @@ function recipe() {
 function defaultStep(op) {
   if (op === "model") { const m = MODELS.find(m => m.downloaded && !["dropin", "irn"].includes(m.family)) || MODELS[0]; return {op, model: m ? m.id : "", width: null}; }
   if (op === "xbr") return {op, scale: 2, width: null};
+  if (op === "edi") return {op, method: "dcci", scale: 2, width: null};
   if (op === "chroma") return {op, mode: "420"};
   if (op === "irn") return {op, direction: "down", scale: 2, width: null};
   return {op: "resize", method: "bicubic", width: "loop"};
@@ -272,7 +276,8 @@ const CHOICES = new WeakMap();   // step -> width choices from the last preview
 function widthOptions(s, choices) {
   const opt = (v, t, sel) => `<option value="${v}" ${sel ? "selected" : ""}>${esc(t)}</option>`;
   const then = s.op === "resize" ? "" : "then ";
-  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size" : "keep the model's size");
+  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size"
+    : (s.op === "edi" ? "keep the new size" : "keep the model's size"));
   let h = s.op === "resize" ? "" : opt("keep", keepLabel, s.width == null);
   h += opt("loop", then + "the loop size", s.width === "loop") + opt("source", then + "the source size", s.width === "source");
   const nums = (choices || []);
@@ -306,15 +311,25 @@ function modelOptions(sel) {
 }
 
 function stepHTML(s, i, n) {
-  const opSel = `<select data-k="op">${["resize", "model", "irn", "xbr", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", xbr: "xBR", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
+  const opSel = `<select data-k="op">${["resize", "model", "irn", "xbr", "edi", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", xbr: "xBR", edi: "edge / pixel ×2", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
   let f = "";
   const w = `<select data-k="wmode">${widthOptions(s, CHOICES.get(s))}</select>`;
   if (s.op === "resize") {
-    f = `<select data-k="method">${KERNELS.map(k => `<option ${s.method === k ? "selected" : ""}>${k}</option>`).join("")}</select> to ${w}`;
-    if (s.method === "dpid") f += `
+    f = `<select data-k="method">${KERNELS.map(k => `<option value="${k}" ${s.method === k ? "selected" : ""}>${KERNEL_LABEL[k] || k}</option>`).join("")}</select> to ${w}`;
+    if (s.method === "perceptual") f += `
+      <label class="muted" title="patch size in the small image; 2 is the paper's">patch
+        <select data-k="patch">${[2, 3, 4].map(k => `<option ${(s.patch || 2) === k ? "selected" : ""} value="${k}">${k}×${k}</option>`).join("")}</select></label>`;
+    else if (s.method === "kopf") f += `
+      <label class="muted" title="most refinement rounds; it usually settles before (default 200)">rounds
+        <input data-k="iterations" type="number" min="10" max="1000" step="10" style="width:70px" value="${s.iterations ?? 200}"></label>`;
+    else if (["seam", "seamins"].includes(s.method)) f += `
+      <label class="muted" title="what counts as important: backward = the 2007 gradient energy, forward = the 2008 'forward energy' (fewer artefacts)">energy
+        <select data-k="energy"><option value="backward" ${(s.energy || "backward") === "backward" ? "selected" : ""}>backward</option>
+        <option value="forward" ${s.energy === "forward" ? "selected" : ""}>forward</option></select></label>`;
+    else if (s.method === "dpid") f += `
       <label class="muted" title="0 = plain box filter; higher keeps small details that stand out (default 1)">detail λ
         <input data-k="lambda" type="number" min="0" max="10" step="0.1" style="width:64px" value="${s.lambda ?? 1}"></label>`;
-    else if (!["nearest", "area"].includes(s.method)) f += `
+    else if (!["nearest", "area", "perceptual", "kopf", "seam", "seamins"].includes(s.method)) f += `
       <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
       <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
   } else if (s.op === "model") {
@@ -332,6 +347,11 @@ function stepHTML(s, i, n) {
       then ${w}${have && !have.downloaded ? ` <span class="err">weights missing</span>` : ""}`;
   } else if (s.op === "xbr") {
     f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select> then ${w}`;
+  } else if (s.op === "edi") {
+    f = `<select data-k="method">${EDI.map(([v, t]) => `<option value="${v}" ${s.method === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <select data-k="scale">${[2, 4, 8].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select>
+      then ${w}` + (s.method !== "mmpx" ? `
+      <label class="muted" title="these keep the original pixels on a grid that sits half a pixel off; on (default) moves it back, off lets the picture creep up-left every pass"><input type="checkbox" data-k="center" ${s.center === false ? "" : "checked"}> keep centred</label>` : "");
   } else if (s.op === "chroma") {
     f = `<select data-k="mode">${CHROMA.map(([v, t]) => `<option ${s.mode === v ? "selected" : ""} value="${v}">${t}</option>`).join("")}</select>
       <select data-k="matrix"><option value="601" ${(s.matrix || "601") === "601" ? "selected" : ""}>BT.601</option><option value="709" ${s.matrix === "709" ? "selected" : ""}>BT.709</option></select>`;
@@ -369,9 +389,20 @@ function renderSteps(el, list) {
         render(); return;
       }
       else if (k === "lambda") { const v = parseFloat(inp.value); if (v === 1 || isNaN(v)) delete s.lambda; else s.lambda = v; }
+      else if (k === "patch") { if (+inp.value === 2) delete s.patch; else s.patch = +inp.value; }
+      else if (k === "iterations") { const v = parseInt(inp.value, 10); if (v === 200 || isNaN(v)) delete s.iterations; else s.iterations = Math.max(10, Math.min(1000, v)); }
+      else if (k === "energy") { if (inp.value === "backward") delete s.energy; else s.energy = "forward"; }
+      else if (k === "center") { if (inp.checked) delete s.center; else s.center = false; }
       else s[k] = inp.value;
       if (k === "method" && ["nearest", "area", "dpid"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
       if (k === "method" && s.method !== "dpid") delete s.lambda;
+      if (k === "method" && s.op === "resize") {
+        if (s.method !== "perceptual") delete s.patch;
+        if (s.method !== "kopf") delete s.iterations;
+        if (!["seam", "seamins"].includes(s.method)) delete s.energy;
+        if (["perceptual", "kopf", "seam", "seamins"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
+      }
+      if (k === "method" && s.op === "edi" && s.method === "mmpx") delete s.center;
       if (k === "method") { render(); return; }
       if (s.width === null && s.op !== "resize") delete s.width;
       if (s.matrix === "601") delete s.matrix;

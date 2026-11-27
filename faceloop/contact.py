@@ -45,11 +45,15 @@ def step_label(s: dict) -> str:
             extra.append("fixed")
         if s["method"] == "dpid":
             extra.append(f"λ{s.get('lambda', 1.0):g}")
+        if s.get("energy") == "forward":
+            extra.append("fwd")
         return f"{s['method']}{' ' + ' '.join(extra) if extra else ''}->{ws}"
     if op == "model":
         return f"{s['model']}->{ws or 'native'}"
     if op == "xbr":
         return f"xBR x{s['scale']}->{ws or 'native'}"
+    if op == "edi":
+        return f"{s['method']} x{s['scale']}->{ws or 'native'}"
     if op == "chroma":
         return f"chroma {s.get('mode', '420')}"
     if op == "irn":

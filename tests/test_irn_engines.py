@@ -45,7 +45,7 @@ def test_fastest_matching_engine_wins(tmp_path, monkeypatch):
     def slow_torch(self, d):
         e = real(self, d)
         f = e.fn
-        e.fn = lambda x: (__import__("time").sleep(0.02), f(x))[1]
+        e.fn = lambda x: (__import__("time").sleep(0.05), f(x))[1]
         return e
     monkeypatch.setattr(IRN, "_torch_engine", slow_torch)
     x = torch.rand(3, 3, 24, 32)

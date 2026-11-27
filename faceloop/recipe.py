@@ -55,7 +55,9 @@ from typing import Any
 ENGINE_PIXELS_VERSION = 5
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
-                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid"}
+                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid", "perceptual": "perc", "kopf": "kopf",
+                "seam": "seam", "seamins": "seamI"}
+CONTENT_AWARE = ("perceptual", "kopf", "seam", "seamins")
 
 
 
@@ -182,8 +184,16 @@ class Recipe:
             if w == "loop" and where.startswith("lead-in"):
                 raise RecipeError(f"{where}: the lead-in defines the loop size, so it can't use 'loop'")
             if op == "resize":
-                if s.get("method") not in METHODS + ("dpid",):
+                if s.get("method") not in METHODS + ("dpid",) + CONTENT_AWARE:
                     raise RecipeError(f"{where}: unknown kernel {s.get('method')!r}")
+                if s.get("method") == "perceptual" and s.get("patch", 2) not in (2, 3, 4):
+                    raise RecipeError(f"{where}: perceptual patch must be 2, 3 or 4")
+                if s.get("method") == "kopf":
+                    it = s.get("iterations", 200)
+                    if not isinstance(it, int) or not (10 <= it <= 1000):
+                        raise RecipeError(f"{where}: Kopf iterations must be 10 to 1000")
+                if s.get("method") in ("seam", "seamins") and s.get("energy", "backward") not in ("backward", "forward"):
+                    raise RecipeError(f"{where}: seam energy must be 'backward' or 'forward'")
                 if s.get("method") == "dpid":
                     lam = s.get("lambda", 1.0)
                     if not isinstance(lam, (int, float)) or not (0 <= lam <= 10):
@@ -199,6 +209,12 @@ class Recipe:
             elif op == "xbr":
                 if s.get("scale") not in (2, 3, 4):
                     raise RecipeError(f"{where}: xBR scale must be 2, 3 or 4")
+            elif op == "edi":
+                from .edi import METHODS as EDI_METHODS
+                if s.get("method") not in EDI_METHODS or s.get("method") == "eedi2":
+                    raise RecipeError(f"{where}: unknown 2x method {s.get('method')!r}")
+                if s.get("scale") not in (2, 4, 8):
+                    raise RecipeError(f"{where}: {s.get('method')} scale must be 2, 4 or 8")
             elif op == "irn":
                 v = s.get("variant", "standard")
                 ok = {"standard": (2, 4, 8), "plus": (4,), "finetune": (2,)}
@@ -309,6 +325,12 @@ def _step_slug(s: dict) -> str:
         m = KERNEL_SHORT.get(s["method"], s["method"])
         if s["method"] == "dpid" and s.get("lambda", 1.0) != 1.0:
             m += f"{s['lambda']:g}"
+        if s["method"] == "perceptual" and s.get("patch", 2) != 2:
+            m += f"p{s['patch']}"
+        if s["method"] == "kopf" and s.get("iterations", 200) != 200:
+            m += f"i{s['iterations']}"
+        if s["method"] in ("seam", "seamins") and s.get("energy", "backward") == "forward":
+            m += "F"
         if s.get("antialias") is False:
             m += "NA"
         if s.get("fixed_point"):
@@ -318,6 +340,9 @@ def _step_slug(s: dict) -> str:
         return f"{model_short(s['model'])}@{ws}" if ws else model_short(s["model"])
     if s.get("op") == "xbr":
         return f"xbr{s['scale']}@{ws}" if ws else f"xbr{s['scale']}"
+    if s.get("op") == "edi":
+        tag = f"{s['method']}{s['scale']}" + ("raw" if s.get("center") is False and s["method"] != "mmpx" else "")
+        return f"{tag}@{ws}" if ws else tag
     if s.get("op") == "irn":
         v = {"plus": "P", "finetune": "F"}.get(s.get("variant", "standard"), "")
         tag = f"irn{v}{'D' if s['direction'] == 'down' else 'U'}{s['scale']}"

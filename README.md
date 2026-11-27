@@ -188,6 +188,12 @@ The list shows every model id, its factor, and its label (`accuracy` or
 (linked from github.com/pkuxmq/Invertible-Image-Rescaling) and put them in
 `weights/irn/`. Then run `selftest`, which checks they load and run.
 
+Content-aware and edge-directed methods (no AI): in a resize step, pick
+perceptual, content-adaptive (Kopf), seam carving (shrink) or seam insertion
+(enlarge); the "edge / pixel ×2" step does MMPX, DCCI, NEDI, ICBI or EEDI3
+at ×2/×4/×8. `faceloop/eedi.py` is a port of GPL-2 code and carries that
+licence. See SPEC.md for what each does and how it was checked.
+
 IRN is a heavy network on the GPU. With half precision on, the first time a
 pass uses it at a frame size it also tries the Neural Engine (via Core ML,
 `coremltools` from `requirements.txt`), checks the result matches, and uses
