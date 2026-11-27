@@ -120,14 +120,24 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
 
 ## Engine
 
-- **Batches** live on the GPU at the loop size through all their cycles, so
-  they can be big when the loop size is small: up to 256 frames, limited by
-  20% of RAM for the loop-size frames and 10% for the uint8 source frames
-  (current + prefetched batch). The lead-in and the finish work at full
-  size, so they run in chunks (from 15% of RAM, at most 64 frames).
-- **Prefetch:** the next batch is read from disk while the GPU works on the
-  current one. Tested: one frame per batch and 8 frames per batch give
-  byte-identical output.
+- **Cycle by cycle:** every frame finishes a cycle before any frame starts
+  the next (stage 0 is the lead-in, stage N is cycle N). Between stages the
+  frames live in the pass folder's `.work/` as raw 8-bit arrays
+  (`stage_NNNN.npy`, a memory-mapped file per stage, plus how many frames
+  of it are written). Only the stage being read and the one being written
+  are kept; `.work/` is deleted when the pass completes and `.done.json`
+  marks it complete. Frames are rounded to 8 bits after every step anyway,
+  so this loses nothing (exact in sRGB rounding; in linear rounding the
+  same linear 8-bit values are stored and re-encoded). The log says how much
+  disk it needs (2 stages × frames × the biggest stage size) and the pass
+  refuses to start without it. A saved loop (cXXXX) is complete for every
+  frame as soon as its cycle is done.
+- **On the GPU,** a stage goes through the frames in batches sized as
+  before: up to 256 frames, limited by 20% of RAM at the biggest size a
+  cycle reaches. The lead-in and the finish work at full size, so they run
+  in chunks (from 15% of RAM, at most 64 frames).
+- **Prefetch:** the next batch is read (from the source or `.work/`) while
+  the GPU works on the current one. Batch sizes don't change the pixels.
 - **Model precision** (per pass): `precision: "fp16"` runs AI models in
   half precision (the GUI's default for new recipes; a recipe file without
   the key stays full precision). Each model gets the first way that passes a test run when
@@ -156,10 +166,11 @@ release or a fixed commit) and SHA-256 (`faceloop/models/catalog.json`).
   for their working memory (2 GB per piece; xBR counts ~24 float copies per
   output pixel, DPID ~32, resizes ~6), halving the piece if the GPU still
   runs out of memory. Same pixels either way: frames are independent.
-- Each batch runs through the whole pass in memory. Saved loops are written
-  as the batch reaches them, then a marker records the batch.
-- Stop or crash: the next run skips finished frames and redoes only the
-  unfinished batch. Pause (GUI) holds between cycles without losing anything.
+- Stop or crash: the next run continues in the same cycle from the last
+  frames written to `.work/` (and confirmed saved, at a save point). Pause
+  (GUI) holds between batches without losing anything. Passes started
+  before cycle-by-cycle runs (`.batches/` markers) count as complete if
+  every frame was done; otherwise they start again (same pixels).
 - **Leave for the Mac** (Queue tab: Off / 10% / 25%; remembered; can be
   changed while a pass runs). See `throttle.py`.
   - GPU: work runs in slices of 32 frames with idle gaps, so that 10% or 25%

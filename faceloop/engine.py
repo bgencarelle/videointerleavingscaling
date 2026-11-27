@@ -306,24 +306,139 @@ class Progress:
     message: str = ""
     frame_cycles: int = 0   # frames x cycles actually processed in this run
     images_saved: int = 0   # saved frames written in this run
+    stage_frames: int = 0   # frames done in the current stage (cycle; 0 = lead-in)
+    base: float = 0.0       # fraction already done when this run started (resume)
 
     def fraction(self) -> float:
+        """Done so far: the lead-in counts as one more cycle's worth."""
         if not self.frames_total or not self.cycles:
             return 0.0
-        done = self.frames_done * self.cycles
-        cur = 0
-        if self.batches:
-            remaining = self.frames_total - self.frames_done
-            per = min(remaining, max(1, -(-self.frames_total // self.batches)))
-            cur = per * self.cycle
-        return min(1.0, (done + cur) / (self.frames_total * self.cycles))
+        if self.frames_done >= self.frames_total:
+            return 1.0
+        done = self.cycle * self.frames_total + self.stage_frames
+        return min(1.0, done / (self.frames_total * (self.cycles + 1)))
 
     def eta_seconds(self) -> float | None:
         f = self.fraction()
-        if f <= 0:
+        if f <= self.base:
             return None
         el = time.time() - self.started
-        return el * (1 - f) / f
+        return el * (1 - f) / (f - self.base)
+
+
+class Work:
+    """The frames between cycles, on disk: .work/stage_NNNN.npy holds every
+    frame after stage NNNN (0 = the lead-in, N = cycle N) as 8-bit codes, and
+    .work/stage_NNNN.json how many frames of it are written. In "linear"
+    rounding the codes are linear-light values (what that rounding keeps),
+    otherwise the encoded values; either way reading them back gives the
+    frames that were written (exactly in sRGB rounding; in linear rounding
+    the same 8-bit values, re-encoded to within float rounding)."""
+
+    def __init__(self, path: Path, recipe: Recipe, names: list[str], transfer: Transfer):
+        self.path = Path(path)
+        self.linear = recipe.rounding == "linear"
+        self.transfer = transfer
+        self.n = len(names)
+        self._open: dict[int, np.ndarray] = {}
+        ident = {"code": recipe.code(), "frames": names}
+        info = self.path / "pass.json"
+        try:
+            ok = json.loads(info.read_text()) == ident
+        except (OSError, json.JSONDecodeError):
+            ok = False
+        if not ok:  # another recipe or other frames: start over
+            self.remove()
+            self.path.mkdir(parents=True, exist_ok=True)
+            info.write_text(json.dumps(ident))
+
+    def _npy(self, k):
+        return self.path / f"stage_{k:04d}.npy"
+
+    def _state(self, k):
+        return self.path / f"stage_{k:04d}.json"
+
+    def _read_state(self, k) -> dict:
+        try:
+            return json.loads(self._state(k).read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def resume_point(self) -> tuple[int, int]:
+        """(stage to run, frames of it already written)."""
+        best = -1
+        for f in self.path.glob("stage_*.json"):
+            st = self._read_state(int(f.stem.split("_")[1]))
+            if st.get("complete"):
+                best = max(best, int(f.stem.split("_")[1]))
+        k = best + 1
+        if best >= 0 and not self._npy(best).exists():
+            return 0, 0  # the frames it needs are gone: start over
+        done = self._read_state(k).get("done", 0) if self._npy(k).exists() else 0
+        return k, done
+
+    def _mm(self, k, shape=None, mode="r"):
+        key = (k, mode)
+        if key not in self._open:
+            if shape is not None and not self._npy(k).exists():
+                self._open[key] = np.lib.format.open_memmap(self._npy(k), mode="w+", dtype=np.uint8, shape=shape)
+            else:
+                self._open[key] = np.load(self._npy(k), mmap_mode="r+" if mode != "r" else "r")
+        return self._open[key]
+
+    def read(self, k: int, i: int, j: int) -> np.ndarray:
+        return np.array(self._mm(k)[i:j])
+
+    def to_tensor(self, u8: np.ndarray, device) -> torch.Tensor:
+        x = torch.from_numpy(u8).to(device).permute(0, 3, 1, 2).float() / 255.0
+        return self.transfer.encode(x) if self.linear else x
+
+    def write(self, k: int, i: int, x: torch.Tensor, n: int) -> None:
+        y = self.transfer.decode(x) if self.linear else x
+        u8 = to_uint8(y)
+        mm = self._mm(k, (n,) + u8.shape[1:], mode="w")
+        if mm.shape[1:] != u8.shape[1:]:
+            raise RecipeError(f"frames changed size inside cycle {k}: {mm.shape[1:]} vs {u8.shape[1:]}")
+        mm[i:i + u8.shape[0]] = u8
+
+    def mark(self, k: int, done: int) -> None:
+        mm = self._open.get((k, "w"))
+        if mm is not None:
+            mm.flush()
+        st = self._read_state(k)
+        if done > st.get("done", 0):
+            self._state(k).write_text(json.dumps({"done": done}))
+
+    def complete(self, k: int) -> None:
+        self.mark(k, self.n)
+        self._state(k).write_text(json.dumps({"done": self.n, "complete": True}))
+        self._open.pop((k, "w"), None)
+        # the stage before is no longer needed
+        for key in [key for key in self._open if key[0] < k]:
+            self._open.pop(key)
+        for old in range(0, k):
+            for f in (self._npy(old), self._state(old)):
+                try:
+                    f.unlink()
+                except FileNotFoundError:
+                    pass
+        # keep a record that the earlier stages were complete
+        self._state(k).write_text(json.dumps({"done": self.n, "complete": True}))
+
+    def set_loop(self, loop: Size) -> None:
+        (self.path / "loop.json").write_text(json.dumps([loop.width, loop.height]))
+
+    def get_loop(self) -> Size | None:
+        try:
+            w, h = json.loads((self.path / "loop.json").read_text())
+            return Size(w, h)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            return None
+
+    def remove(self) -> None:
+        self._open.clear()
+        import shutil
+        shutil.rmtree(self.path, ignore_errors=True)
 
 
 class Controls:
@@ -656,9 +771,8 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
         recorder = ContactRecorder(folder, recipe)
         on_contact = recorder
     lock = gpu_lock if gpu_lock is not None else contextlib.nullcontext()
-    marker_dir = folder / ".batches"
     if write:
-        marker_dir.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)
 
     def _log(msg: str):
         stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -687,21 +801,6 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     if recipe.output.get("format") == "webp" and recipe.output.get("sharp_yuv", True) and webp_desc.startswith("Pillow"):
         _log(f"warning: {webp_desc}")
 
-    # which frames are already done?
-    done: set[str] = set()
-    if write:
-        for m in marker_dir.glob("batch_*.json"):
-            try:
-                info = json.loads(m.read_text())
-            except json.JSONDecodeError:
-                continue
-            if info.get("code") == recipe.code() and info.get("iterations", 0) >= recipe.iterations:
-                done.update(info.get("frames", []))
-    todo = [p for p in frames if p.name not in done]
-    skipped = len(frames) - len(todo)
-    if skipped:
-        _log(f"resuming: {skipped} frames already done")
-
     cycles, auto = check_pattern(recipe, src, models)
     bs, chunk = batch_sizes(src, recipe, models=models)
     bs = batch_size or bs
@@ -723,105 +822,196 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
         for mid in sorted(recipe.model_ids()):
             _log(f"{mid} runs in {models.precision_of(mid, device, 'fp16')}")
 
-    progress.frames_total = len(frames)
-    progress.frames_done = skipped
+    # ---- cycle by cycle: every frame finishes a cycle before any starts the
+    # next. Between cycles the frames live in .work/ as raw 8-bit arrays
+    # (stage 0 = after the lead-in, stage N = after cycle N); only the stage
+    # being read and the one being written are kept, and .work/ is deleted
+    # when the pass is done. Frames are already rounded to 8 bits after every
+    # step, so storing them loses nothing.
+    import tempfile
+    work = Work(folder / ".work" if write else Path(tempfile.mkdtemp(prefix="faceloop-")) / ".work",
+                recipe, [p.name for p in frames], transfer)
+    if write and (folder / ".done.json").exists():
+        try:
+            if json.loads((folder / ".done.json").read_text()).get("code") == recipe.code():
+                _log("already complete")
+                return PassResult(folder=folder, frames=len(frames), seconds=0.0, skipped_frames=len(frames))
+        except (json.JSONDecodeError, OSError):
+            pass
+    n = len(frames)
+    if write and (folder / ".batches").is_dir():  # a pass from before cycle-by-cycle runs
+        old = set()
+        for m in (folder / ".batches").glob("batch_*.json"):
+            try:
+                info = json.loads(m.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if info.get("code") == recipe.code() and info.get("iterations", 0) >= recipe.iterations:
+                old.update(info.get("frames", []))
+        if all(p.name in old for p in frames):
+            _log("already complete")
+            work.remove()
+            return PassResult(folder=folder, frames=n, seconds=0.0, skipped_frames=n)
+        if old:
+            _log(f"this pass was started before cycle-by-cycle runs; its {len(old)} finished frames "
+                 "are done again (same pixels)")
+    resume_stage, resume_done = work.resume_point()
+    if resume_stage > 0:  # the lead-in won't run again: it's what sets the loop size
+        ctx.loop = work.get_loop()
+        if ctx.loop is None:
+            resume_stage, resume_done = 0, 0
+    if resume_stage or resume_done:
+        _log(f"resuming at {'the lead-in' if resume_stage == 0 else f'cycle {resume_stage}'}"
+             f", frame {resume_done + 1} of {n}")
+
+    progress.frames_total = n
     progress.cycles = recipe.iterations
-    progress.batches = -(-len(todo) // bs) if todo else 0
+    progress.batches = -(-n // bs)
+    progress.cycle = resume_stage
+    progress.base = (resume_stage * n + resume_done) / (n * (recipe.iterations + 1))
+    progress.stage_frames = resume_done
     t0 = time.time()
     pool = ThreadPoolExecutor(max_workers=max(2, (os.cpu_count() or 4) // 2))
-    loader = ThreadPoolExecutor(max_workers=4)  # reads the next batch while the GPU works
-    pending = []
+    loader = ThreadPoolExecutor(max_workers=4)  # reads the next chunk while the GPU works
     saved_size = None
     noted: set[str] = set()
     stopped = False
-    _log(f"batches of {bs} frames (full-size work in chunks of {chunk})")
+    try:
+        sim = simulate_pattern(recipe, src, models, cycles=cycles)
+        px = max([sim["loop"].width * sim["loop"].height, sim["end"].width * sim["end"].height]
+                 + [z.width * z.height for z in sim["starts"].values()])
+    except Exception:  # noqa: BLE001
+        px = src.width * src.height
+    need = 2 * n * px * 3
+    _log(f"cycle by cycle over all {n} frames, {bs} at a time on the GPU "
+         f"(full-size work in chunks of {chunk}); frames between cycles in .work/ "
+         f"(about {need / 1024 ** 3:.1f} GB while running, deleted at the end)")
+    if write:
+        import shutil
+        free = shutil.disk_usage(folder).free
+        if free < need * 1.1:
+            raise RecipeError(f"not enough disk space for the frames between cycles: needs about "
+                              f"{need / 1024 ** 3:.1f} GB, {free / 1024 ** 3:.1f} GB free")
     if auto:
         _log(f"cycle{'s' if len(auto) > 1 else ''} {', '.join(sorted(auto))} start with the lead-in "
              "(added automatically: without it the frame sizes would keep growing)")
     if recorder is not None:
         recorder.cycles, recorder.auto, recorder.n_lead = cycles, auto, len(recipe.lead_in)
 
-    def prefetch(start):
-        return [loader.submit(load_frame, p) for p in todo[start:start + bs]]
+    def stage_lead_in(first):
+        """Stage 0: source frames through the lead-in."""
+        step = chunk if recipe.lead_in else bs
 
-    try:
-        nxt = prefetch(0) if todo else []
-        for bi in range(0, len(todo), bs):
-            batch = todo[bi:bi + bs]
-            tb = time.time()
-            saved_before = progress.images_saved
-            progress.batch = bi // bs + 1
+        def read(i):
+            return [loader.submit(load_frame, p) for p in frames[i:i + step]]
+        nxt = read(first)
+        for i in range(first, n, step):
+            controls.checkpoint()
             arrs = [f.result()[0] for f in nxt]
-            nxt = prefetch(bi + bs)
-            for p, a in zip(batch, arrs):
+            nxt = read(i + step)
+            for p, a in zip(frames[i:i + step], arrs):
                 if a.shape[:2] != (src.height, src.width):
                     raise RecipeError(f"{p.name} is {a.shape[1]}x{a.shape[0]}, expected {src}")
             x = lead_in_chunked(arrs, recipe, ctx, chunk, device, lock)
-            del arrs
-            want = [i for i, p in enumerate(batch) if p.name in contact_names]
+            yield i, x
 
-            for ci in range(1, recipe.iterations + 1):
-                controls.checkpoint()
-                progress.cycle = ci
-                cname = recipe.cycle_at(ci)
-                capture = None
-                if on_contact and want and last_of_cycle.get(cname) == ci:
-                    def capture(step_i, t, _c=cname, _w=want, _b=batch):
-                        on_contact(_c, step_i, [_b[i].name for i in _w], to_uint8(t[_w]))
-                x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, batch, on_contact)
-                if ci == 1 and models is not None and hasattr(models, "take_notes"):
-                    for note in models.take_notes(noted, recipe.model_ids()):  # engines chosen in cycle 1
-                        _log(note)
-                progress.frame_cycles += len(batch)
+    def stage_cycle(ci, first):
+        """Stage ci: the frames after cycle ci-1 through cycle ci."""
+        cname = recipe.cycle_at(ci)
+        want_all = ci == last_of_cycle.get(cname) and on_contact is not None
+
+        def read(i):
+            return loader.submit(work.read, ci - 1, i, min(n, i + bs))
+        nxt = read(first)
+        for i in range(first, n, bs):
+            controls.checkpoint()
+            x = work.to_tensor(nxt.result(), device)
+            if i + bs < n:
+                nxt = read(i + bs)
+            names = frames[i:i + bs]
+            want = [k for k, p in enumerate(names) if p.name in contact_names] if want_all else []
+            capture = None
+            if want:
+                def capture(step_i, t, _c=cname, _w=want, _b=names):
+                    on_contact(_c, step_i, [_b[k].name for k in _w], to_uint8(t[_w]))
+            x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, names, on_contact)
+            yield i, x
+
+    try:
+        for ci in range(resume_stage, recipe.iterations + 1):
+            first = resume_done if ci == resume_stage else 0
+            progress.cycle = ci
+            progress.stage_frames = first
+            tb = time.time()
+            saved_before = progress.images_saved
+            pending: list = []   # (end index, save futures) not yet confirmed on disk
+            gen = stage_lead_in(first) if ci == 0 else stage_cycle(ci, first)
+            for bi, (i, x) in enumerate(gen):
+                progress.batch = i // bs + 1
+                j = i + x.shape[0]
+                work.write(ci, i, x, n)
+                futs = []
                 if ci in save_pts and write:
                     cdir = folder / f"c{ci:04d}"
                     cdir.mkdir(exist_ok=True)
                     u8 = finish_chunked(x, recipe, ctx, chunk, lock)
                     saved_size = Size(u8.shape[2], u8.shape[1])
-                    for p, img in zip(batch, u8):
+                    for p, img in zip(frames[i:j], u8):
+                        futs.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
+                                                img, icc, recipe.output))
                         progress.images_saved += 1
-                        pending.append(pool.submit(save_frame, cdir / (p.stem + "." + recipe.output.get("format", "webp")),
-                                                   img, icc, recipe.output))
-            for f in pending:
-                f.result()
-            pending.clear()
-            if write:
-                marker = marker_dir / f"batch_{int(time.time() * 1000)}_{bi:06d}.json"
-                marker.write_text(json.dumps({"code": recipe.code(), "iterations": recipe.iterations,
-                                              "frames": [p.name for p in batch]}))
-            if recorder is not None and want:
+                pending.append((j, futs))
+                while pending and all(f.done() for f in pending[0][1]):  # saved: safe to resume after it
+                    end, fs = pending.pop(0)
+                    for f in fs:
+                        f.result()
+                    work.mark(ci, end)
+                if ci > 0:
+                    progress.frame_cycles += x.shape[0]
+                progress.stage_frames = j
+                if ci == 1 and bi == 0 and models is not None and hasattr(models, "take_notes"):
+                    for note in models.take_notes(noted, recipe.model_ids()):  # engines chosen in cycle 1
+                        _log(note)
+                del x
+            for end, fs in pending:
+                for f in fs:
+                    f.result()
+                work.mark(ci, end)
+            if ci == 0 and ctx.loop is not None:
+                work.set_loop(ctx.loop)
+            work.complete(ci)
+            if recorder is not None and ci > 0 and ci == last_of_cycle.get(recipe.cycle_at(ci)):
                 recorder.build()
             if models is not None and hasattr(models, "take_notes"):
                 for note in models.take_notes(noted, recipe.model_ids()):
                     _log(note)
-            progress.frames_done += len(batch)
-            progress.cycle = 0
             dt = time.time() - tb
-            fc = len(batch) * recipe.iterations
+            done_now = n - first
             eta = progress.eta_seconds()
-            _log(f"batch {progress.batch}/{progress.batches} done: {len(batch)} frames x {recipe.iterations} cycles"
-                 f" = {fc:,} frame-cycles in {dt:.1f}s ({dt / fc * 1000:.2f} ms each)"
-                 f" · {progress.images_saved - saved_before} images saved"
-                 f" · total {progress.frames_done}/{len(frames)} frames, {progress.frame_cycles:,} frame-cycles,"
-                 f" {progress.images_saved:,} images · {_fmt_eta(time.time() - t0)} elapsed"
-                 + (f" · ~{_fmt_eta(eta)} left" if eta else ""))
+            what = "lead-in" if ci == 0 else f"cycle {ci}/{recipe.iterations} ({recipe.cycle_at(ci)})"
+            _log(f"{what} done for {n} frames in {dt:.1f}s ({dt / max(1, done_now) * 1000:.2f} ms per frame)"
+                 + (f" · saved c{ci:04d} ({progress.images_saved - saved_before} images)" if ci in save_pts else "")
+                 + f" · {_fmt_eta(time.time() - t0)} elapsed" + (f" · ~{_fmt_eta(eta)} left" if eta else ""))
+        progress.frames_done = n
+        if write:
+            (folder / ".done.json").write_text(json.dumps({"code": recipe.code(), "iterations": recipe.iterations}))
+        work.remove()
     except StopRequested:
         stopped = True
-        _log("stopped; the current batch will be redone on resume")
+        _log(f"stopped in {'the lead-in' if progress.cycle == 0 else f'cycle {progress.cycle}'}; "
+             "it continues from the last frames written")
     finally:
-        for f in pending:
-            try:
-                f.result()
-            except Exception:  # noqa: BLE001
-                pass
         pool.shutdown(wait=True)
         loader.shutdown(wait=False, cancel_futures=True)
+        if not write:
+            work.remove()
 
     secs = time.time() - t0
     if write and not stopped:
         _update_catalog(out_root, ident["label"], folder, recipe, gan, src, len(frames), saved_size)
         _log(f"pass complete in {_fmt_eta(secs)}: {progress.frame_cycles:,} frame-cycles, {progress.images_saved:,} images saved")
-    return PassResult(folder=folder, frames=len(frames), seconds=secs, skipped_frames=skipped, stopped=stopped)
+    return PassResult(folder=folder, frames=len(frames), seconds=secs,
+                      skipped_frames=resume_done if resume_stage == 0 else len(frames), stopped=stopped)
 
 
 CATALOG_FIELDS = ["code", "source", "folder", "slug", "name", "pattern", "cycles", "iterations",

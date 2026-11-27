@@ -226,23 +226,60 @@ def test_cycle_ends_where_its_last_step_ends():
     assert torch.equal(y, torch.round(y * 255) / 255)
 
 
-def test_stop_and_resume(tmp_path):
+def _frames(folder):
+    import numpy as np
+    from PIL import Image
+    return {p.relative_to(folder).as_posix(): np.asarray(Image.open(p)) for p in sorted(folder.glob("c*/*.webp"))}
+
+
+def test_stop_and_resume(tmp_path, monkeypatch):
+    import faceloop.engine as eng
     src, _ = _make_source(tmp_path)
-    out = tmp_path / "out"
-    r = _recipe(iterations=4)
+    r = _recipe(iterations=4, save_every=4)
+    # uninterrupted, everything on the GPU at once
+    whole = run_pass(r, src, tmp_path / "a", device=torch.device("cpu"), batch_size=8)
+    assert not (whole.folder / ".work").exists()  # temporary frames are gone
+    # stopped half-way through cycle 2 (after its first 4 frames are written)
     ctl = Controls()
-    calls = {"n": 0}
+    real_mark = eng.Work.mark
 
-    def log(_):
-        calls["n"] += 1
-        if "batch 1/" in _:
+    def mark(self, k, done):
+        real_mark(self, k, done)
+        if k == 2 and done == 4:
             ctl.stop()
-
-    res = run_pass(r, src, out, device=torch.device("cpu"), batch_size=4, controls=ctl, log=log)
-    assert res.stopped
-    res2 = run_pass(r, src, out, device=torch.device("cpu"), batch_size=4)
-    assert res2.skipped_frames == 4 and not res2.stopped
+    monkeypatch.setattr(eng.Work, "mark", mark)
+    lines = []
+    res = run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), batch_size=4, controls=ctl, log=lines.append)
+    assert res.stopped and (res.folder / ".work").exists()
+    assert any("cycle 1/4" in l for l in lines) and not any("cycle 2/4" in l for l in lines)
+    monkeypatch.setattr(eng.Work, "mark", real_mark)
+    lines.clear()
+    res2 = run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), batch_size=4, log=lines.append)
+    assert not res2.stopped and any("resuming at cycle 2, frame 5 of 8" in l for l in lines)
     assert len(list((res2.folder / "c0004").glob("*.webp"))) == 8
+    a, b = _frames(whole.folder), _frames(res2.folder)
+    assert a.keys() == b.keys() and all((a[k] == b[k]).all() for k in a)
+    # run again: nothing to do
+    lines.clear()
+    run_pass(r, src, tmp_path / "b", device=torch.device("cpu"), log=lines.append)
+    assert any("already complete" in l for l in lines)
+
+
+def test_temporary_frames_are_exact_in_linear_rounding(tmp_path):
+    from faceloop.engine import Work
+    from faceloop.colour import quantize
+    r = _recipe(iterations=1)
+    r.rounding = "linear"
+    w = Work(tmp_path / ".work", r, ["a", "b"], Transfer())
+    x = quantize(torch.rand(2, 3, 5, 7), "linear", Transfer())
+    w.write(1, 0, x, 2)
+    back = w.to_tensor(w.read(1, 0, 2), torch.device("cpu"))
+    assert (back - x).abs().max() < 1e-6  # same 8-bit codes; float rounding only
+    r.rounding = "srgb"
+    w = Work(tmp_path / ".work2", r, ["a", "b"], Transfer())
+    x = quantize(torch.rand(2, 3, 5, 7), "srgb", Transfer())
+    w.write(1, 0, x, 2)
+    assert torch.equal(w.to_tensor(w.read(1, 0, 2), torch.device("cpu")), x)
 
 
 def test_linear_light_differs_from_encoded(tmp_path):

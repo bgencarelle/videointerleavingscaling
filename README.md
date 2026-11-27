@@ -33,7 +33,12 @@ passes are still there next time.
     The output doesn't change, only the speed.
   - faceloop always leaves 4 GB of memory free, so the Mac doesn't start
     swapping.
-  - Pause/Resume holds between cycles without losing anything.
+  - Passes run cycle by cycle: all frames go through cycle 1, then all
+    through cycle 2, and so on, so the progress reads "cycle 37 of 200" and
+    a saved loop is complete as soon as its cycle is done. Frames between
+    cycles are kept in the pass folder's `.work/` (raw, deleted at the end).
+  - Pause/Resume holds without losing anything; Stop and Continue picks up
+    in the same cycle where it stopped.
   - Stop ends after the current step; Continue picks up where it stopped
     (finished frames are skipped).
 - **Results:** every pass in an output folder, filterable. Each card shows a
