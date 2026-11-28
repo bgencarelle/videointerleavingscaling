@@ -319,6 +319,8 @@ class ModelManager:
             return "float32"
         if self.catalog[mid].family == "irn":
             return self.get_irn(mid, device, precision).precision_label
+        if self.catalog[mid].family == "vsr":
+            return "float16 (flow in float32)" if device.type != "cpu" else "float32"
         return self.get(mid, device, precision).precision_label
 
     def _load(self, mid: str, device: torch.device) -> ModelRunner:
@@ -327,6 +329,8 @@ class ModelManager:
         info = self.catalog[mid]
         if not self.is_downloaded(mid):
             raise FileNotFoundError(f"model {mid} is not downloaded yet")
+        if info.family == "vsr":
+            raise ValueError(f"{mid} is a video model: use it in a video upscale (vsr) step")
         if info.family == "waifu2x":
             from .ncnn_port import Waifu2x
             a = info.args
@@ -381,6 +385,29 @@ class ModelManager:
             self._loaded.move_to_end(key)
             return self._loaded[key]
 
+    def get_vsr(self, mid: str, device: torch.device, precision: str = "fp32"):
+        """A BasicVSR network (models/basicvsr.py), e.g. 'basicvsr-reds4'.
+        fp16 halves everything but SPyNet, whose flow stays in float32."""
+        info = self.catalog.get(mid)
+        if info is None or info.family != "vsr":
+            raise KeyError(f"unknown video model {mid!r}")
+        key = (mid, str(device), "vsr", precision)
+        with self._lock:
+            if key not in self._loaded:
+                if not self.is_downloaded(mid):
+                    raise FileNotFoundError(f"model {mid} is not downloaded yet")
+                from .basicvsr import BasicVSRNet
+                net = BasicVSRNet.from_checkpoint(self.weights_dir / info.files[0]["path"]).to(device)
+                if precision == "fp16" and device.type != "cpu":
+                    sp = net.spynet
+                    net.half()
+                    net.spynet = sp.float()
+                self._loaded[key] = net
+                while len(self._loaded) > self._keep:
+                    self._loaded.popitem(last=False)
+            self._loaded.move_to_end(key)
+            return self._loaded[key]
+
     def take_notes(self, seen: set, mids=None) -> list[str]:
         """Messages from loaded networks (e.g. which engine IRN chose) not in
         `seen` yet (which is updated); only from `mids` if given."""
@@ -403,6 +430,12 @@ class ModelManager:
                 x = torch.rand(1, 3, 32, 40, device=device)
                 y = m.up(m.down(x))
                 ok = y.shape == x.shape and bool(torch.isfinite(y).all())
+                return ok, "ok" if ok else f"bad output {tuple(y.shape)}"
+            if self.catalog[mid].family == "vsr":
+                net = self.get_vsr(mid, device)
+                x = torch.rand(1, 2, 3, 32, 40, device=device)
+                y = net(x)
+                ok = y.shape == (1, 2, 3, 128, 160) and bool(torch.isfinite(y).all())
                 return ok, "ok" if ok else f"bad output {tuple(y.shape)}"
             r = self.get(mid, device)
             x = torch.rand(1, 3, 30, 40, device=device)

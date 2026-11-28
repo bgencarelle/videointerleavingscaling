@@ -235,9 +235,31 @@ async function api(path, body) {
 const fileUrl = p => "/api/file?path=" + encodeURIComponent(p);
 
 // ------------------------------------------------------------------ state
-const KERNELS = ["nearest", "area", "bilinear", "bicubic", "lanczos", "dpid", "perceptual", "kopf"];
-const KERNEL_LABEL = {perceptual: "perceptual (Öztireli)", kopf: "content-adaptive (Kopf)"};
-const EDI = [["mmpx", "MMPX (pixel art)"], ["dcci", "DCCI"], ["nedi", "NEDI"], ["icbi", "ICBI"], ["eedi3", "EEDI3"]];
+const KERNEL_GROUPS = [
+  ["basic", ["nearest", "area", "bilinear", "bicubic", "lanczos"]],
+  ["cubic family", ["mitchell", "catrom", "bspline", "hermite"]],
+  ["more kernels", ["lanczos2", "lanczos4", "lanczos8", "spline16", "spline36", "spline64", "gaussian", "magic"]],
+  ["round (EWA)", ["ewa_lanczos", "ewa_lanczossharp", "ewa_robidoux", "ewa_robidouxsharp"]],
+  ["frequency", ["dct", "fft", "wavelet53", "wavelet97"]],
+  ["detail / content-aware", ["dpid", "perceptual", "kopf"]],
+];
+const KERNELS = KERNEL_GROUPS.flatMap(g => g[1]);
+const KERNEL_LABEL = {lanczos: "lanczos (3 lobes)", lanczos2: "lanczos 2 lobes", lanczos4: "lanczos 4 lobes",
+  lanczos8: "lanczos 8 lobes", mitchell: "Mitchell-Netravali", catrom: "Catmull-Rom", bspline: "B-spline (soft)",
+  hermite: "Hermite", spline16: "Spline16", spline36: "Spline36", spline64: "Spline64", gaussian: "Gaussian",
+  magic: "Magic Kernel Sharp", ewa_lanczos: "EWA Lanczos (jinc)", ewa_lanczossharp: "EWA Lanczos sharp",
+  ewa_robidoux: "EWA Robidoux (ImageMagick)", ewa_robidouxsharp: "EWA Robidoux sharp",
+  dct: "DCT (spectral)", fft: "FFT (wraps around)", wavelet53: "wavelet 5/3 (JPEG 2000)", wavelet97: "wavelet 9/7 (JPEG 2000)",
+  perceptual: "perceptual (Öztireli)", kopf: "content-adaptive (Kopf)"};
+const NO_AA = ["nearest", "area", "dpid", "perceptual", "kopf", "wavelet53", "wavelet97"];
+const NO_FP = m => m.startsWith("ewa_") || ["dct", "fft", "wavelet53", "wavelet97"].includes(m);
+const EDI_GROUPS = [
+  ["edge-directed", [["dcci", "DCCI"], ["nedi", "NEDI"], ["icbi", "ICBI"], ["eedi3", "EEDI3"], ["eedi2", "EEDI2"], ["nnedi3", "NNEDI3"]]],
+  ["pixel art (emulators)", [["mmpx", "MMPX"], ["scale2x", "Scale2x / EPX"], ["scale3x", "Scale3x"], ["2xsai", "2xSaI"],
+    ["super2xsai", "Super 2xSaI"], ["supereagle", "Super Eagle"], ["hqx", "hqx (hq2x/3x/4x)"], ["superxbr", "Super-xBR"], ["scalefx", "ScaleFX"]]],
+];
+const EDI_SCALES = {scale3x: [3, 9], hqx: [2, 3, 4], scalefx: [3, 9]};
+const EDI_CENTRABLE = ["dcci", "nedi", "icbi", "eedi3", "eedi2", "nnedi3", "2xsai", "super2xsai", "supereagle"];
 const CHROMA = [["420", "4:2:0"], ["422", "4:2:2"], ["411", "4:1:1 (DV)"], ["410", "4:1:0 (YUV9)"]];
 let MODELS = [];
 let state = {
@@ -262,6 +284,8 @@ function defaultStep(op) {
   if (op === "xbr") return {op, scale: 2, width: null};
   if (op === "edi") return {op, method: "dcci", scale: 2, width: null};
   if (op === "chroma") return {op, mode: "420"};
+  if (op === "video") return {op, mode: "fields", field: "alternate", rebuild: "linear"};
+  if (op === "vsr") return {op, model: "basicvsr-reds4", width: null};
   if (op === "irn") return {op, direction: "down", scale: 2, width: null};
   return {op: "resize", method: "bicubic", width: "loop"};
 }
@@ -275,7 +299,7 @@ const CHOICES = new WeakMap();   // step -> width choices from the last preview
 function widthOptions(s, choices) {
   const opt = (v, t, sel) => `<option value="${v}" ${sel ? "selected" : ""}>${esc(t)}</option>`;
   const then = s.op === "resize" ? "" : "then ";
-  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size"
+  const keepLabel = s.op === "xbr" ? "keep the xBR size" : (s.op === "irn" ? "keep the IRN size" : s.op === "vsr" ? "keep the ×4 size"
     : (s.op === "edi" ? "keep the new size" : "keep the model's size"));
   let h = s.op === "resize" ? "" : opt("keep", keepLabel, s.width == null);
   h += opt("loop", then + "the loop size", s.width === "loop") + opt("source", then + "the source size", s.width === "source");
@@ -296,7 +320,7 @@ function widthOptions(s, choices) {
 }
 
 function modelOptions(sel) {
-  const fam = {}; MODELS.filter(m => m.family !== "irn").forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
+  const fam = {}; MODELS.filter(m => !["irn", "vsr"].includes(m.family)).forEach(m => (fam[m.family] = fam[m.family] || []).push(m));
   let h = "";
   for (const [f, list] of Object.entries(fam)) {
     h += `<optgroup label="${esc(f)}">`;
@@ -310,11 +334,14 @@ function modelOptions(sel) {
 }
 
 function stepHTML(s, i, n) {
-  const opSel = `<select data-k="op">${["resize", "model", "irn", "xbr", "edi", "chroma"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", xbr: "xBR", edi: "edge / pixel ×2", chroma: "colour res."}[o]}</option>`).join("")}</select>`;
+  const opSel = `<select data-k="op">${["resize", "model", "irn", "vsr", "xbr", "edi", "chroma", "video"].map(o => `<option ${s.op === o ? "selected" : ""} value="${o}">${{resize: "resize", model: "AI model", irn: "IRN (AI)", vsr: "BasicVSR (video AI)", xbr: "xBR", edi: "edge / pixel art", chroma: "colour res.", video: "old video"}[o]}</option>`).join("")}</select>`;
   let f = "";
   const w = `<select data-k="wmode">${widthOptions(s, CHOICES.get(s))}</select>`;
   if (s.op === "resize") {
-    f = `<select data-k="method">${KERNELS.map(k => `<option value="${k}" ${s.method === k ? "selected" : ""}>${KERNEL_LABEL[k] || k}</option>`).join("")}</select> to ${w}`;
+    f = `<select data-k="method">${KERNEL_GROUPS.map(([g, ks]) => `<optgroup label="${g}">` + ks.map(k => `<option value="${k}" ${s.method === k ? "selected" : ""}>${KERNEL_LABEL[k] || k}</option>`).join("") + "</optgroup>").join("")}</select> to ${w}`;
+    if (s.method === "gaussian") f += `
+      <label class="muted" title="blur radius in input pixels (default 0.5)">σ
+        <input data-k="sigma" type="number" min="0.2" max="3" step="0.1" style="width:60px" value="${s.sigma ?? 0.5}"></label>`;
     if (s.method === "perceptual") f += `
       <label class="muted" title="patch size in the small image; 2 is the paper's">patch
         <select data-k="patch">${[2, 3, 4].map(k => `<option ${(s.patch || 2) === k ? "selected" : ""} value="${k}">${k}×${k}</option>`).join("")}</select></label>`;
@@ -324,9 +351,10 @@ function stepHTML(s, i, n) {
     else if (s.method === "dpid") f += `
       <label class="muted" title="0 = plain box filter; higher keeps small details that stand out (default 1)">detail λ
         <input data-k="lambda" type="number" min="0" max="10" step="0.1" style="width:64px" value="${s.lambda ?? 1}"></label>`;
-    else if (!["nearest", "area", "perceptual", "kopf"].includes(s.method)) f += `
-      <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>
-      <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`;
+    if (!NO_AA.includes(s.method)) f += `
+      <label class="muted"><input type="checkbox" data-k="noaa" ${s.antialias === false ? "checked" : ""}> no antialias</label>` +
+      (NO_FP(s.method) ? "" : `
+      <label class="muted"><input type="checkbox" data-k="fixed_point" ${s.fixed_point ? "checked" : ""}> fixed-point</label>`);
   } else if (s.op === "model") {
     f = `<select class="model" data-k="model">${modelOptions(s.model)}</select> then ${w}`;
   } else if (s.op === "irn") {
@@ -340,13 +368,40 @@ function stepHTML(s, i, n) {
         <option value="up" ${s.direction === "up" ? "selected" : ""}>enlarge</option></select>
       <select data-k="scale">${scales.map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">${s.direction === "down" ? "÷" : "×"}${k}</option>`).join("")}</select>
       then ${w}${have && !have.downloaded ? ` <span class="err">weights missing</span>` : ""}`;
+  } else if (s.op === "vsr") {
+    const vms = MODELS.filter(m => m.family === "vsr");
+    const have = vms.find(m => m.id === (s.model || "basicvsr-reds4"));
+    const mem = s.memory ?? 1;
+    f = `<select data-k="model">${vms.map(m => `<option value="${esc(m.id)}" ${m.id === (s.model || "basicvsr-reds4") ? "selected" : ""}>${esc(m.id.replace("basicvsr-", ""))}${m.downloaded ? "" : " (not downloaded)"}</option>`).join("")}</select>
+      ×4 then ${w}${have && !have.downloaded ? ` <span class="err">weights missing</span>` : ""}
+      <label class="muted" title="how many neighbouring frames it may learn from. 1 (default) = every frame alone, nothing mixed. Higher: windows of that many frames, in frame-number order, never past the batch in memory">memory
+        <input data-k="memory" type="number" min="1" max="100" step="1" style="width:56px" value="${mem}"> frames</label>`;
+    if (mem > 1) f += `
+      <select data-k="direction" title="both = as trained; forward/backward: the other half sees only the current frame">${[["both", "both ways"], ["forward", "forward only"], ["backward", "backward only"]].map(([v, t]) => `<option value="${v}" ${(s.direction || "both") === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <select data-k="order">${[["normal", "frame order"], ["reverse", "reversed"], ["shuffle", "shuffled"]].map(([v, t]) => `<option value="${v}" ${(s.order || "normal") === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <label class="muted" title="multiplies the motion it lines memories up with: 0 = no alignment (ghosts), 1 = as trained, more = overshoot">flow
+        <input data-k="flow" type="number" min="0" max="3" step="0.1" style="width:56px" value="${s.flow ?? 1}"></label>`;
   } else if (s.op === "xbr") {
     f = `<select data-k="scale">${[2, 3, 4].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select> then ${w}`;
   } else if (s.op === "edi") {
-    f = `<select data-k="method">${EDI.map(([v, t]) => `<option value="${v}" ${s.method === v ? "selected" : ""}>${t}</option>`).join("")}</select>
-      <select data-k="scale">${[2, 4, 8].map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select>
-      then ${w}` + (s.method !== "mmpx" ? `
-      <label class="muted" title="these keep the original pixels on a grid that sits half a pixel off; on (default) moves it back, off lets the picture creep up-left every pass"><input type="checkbox" data-k="center" ${s.center === false ? "" : "checked"}> keep centred</label>` : "");
+    f = `<select data-k="method">${EDI_GROUPS.map(([g, ms]) => `<optgroup label="${g}">` + ms.map(([v, t]) => `<option value="${v}" ${s.method === v ? "selected" : ""}>${t}</option>`).join("") + "</optgroup>").join("")}</select>
+      <select data-k="scale">${(EDI_SCALES[s.method] || [2, 4, 8]).map(k => `<option ${s.scale === k ? "selected" : ""} value="${k}">×${k}</option>`).join("")}</select>
+      then ${w}` + (s.method === "nnedi3" ? `
+      <select data-k="quality"><option value="fast" ${(s.quality || "fast") === "fast" ? "selected" : ""}>fast (filter default)</option>
+        <option value="best" ${s.quality === "best" ? "selected" : ""}>best (rpow2 settings, ~8× slower)</option></select>` : "") + (EDI_CENTRABLE.includes(s.method) ? `
+      <label class="muted" title="these put the picture a half or whole pixel up-left of where it belongs; on (default) moves it back, off lets it creep up-left every pass"><input type="checkbox" data-k="center" ${s.center === false ? "" : "checked"}> keep centred</label>` : "");
+  } else if (s.op === "video") {
+    const kopt = (cur, extra) => KERNEL_GROUPS.map(([g, ks]) => `<optgroup label="${g}">` + ks.filter(k => !["perceptual", "kopf"].includes(k)).map(k => `<option value="${k}" ${cur === k ? "selected" : ""}>${KERNEL_LABEL[k] || k}</option>`).join("") + "</optgroup>").join("");
+    f = `<select data-k="mode"><option value="fields" ${s.mode === "fields" ? "selected" : ""}>interlace: keep one field</option>
+        <option value="squash" ${s.mode === "squash" ? "selected" : ""}>squash &amp; stretch</option></select>`;
+    if (s.mode === "fields") f += `
+      <select data-k="field">${[["alternate", "alternate fields"], ["top", "top field"], ["bottom", "bottom field"]].map(([v, t]) => `<option value="${v}" ${(s.field || "alternate") === v ? "selected" : ""}>${t}</option>`).join("")}</select>
+      <select data-k="rebuild" title="double: repeat lines (moves the picture half a line, once); linear / cubic: bob, nothing moves">${[["linear", "bob (linear)"], ["cubic", "bob (cubic)"], ["double", "line doubling"]].map(([v, t]) => `<option value="${v}" ${(s.rebuild || "linear") === v ? "selected" : ""}>${t}</option>`).join("")}</select>`;
+    else f += `
+      <select data-k="axis"><option value="x" ${(s.axis || "x") === "x" ? "selected" : ""}>across</option><option value="y" ${s.axis === "y" ? "selected" : ""}>down</option></select>
+      to <input data-k="factor" type="number" min="0.05" max="0.99" step="0.05" style="width:64px" value="${s.factor ?? 0.5}" title="fraction of the size it's squeezed to (0.75 = 4:3 in 16:9)">
+      with <select data-k="down">${kopt(s.down || "area")}</select>
+      back with <select data-k="up">${kopt(s.up || "bicubic").replace('<option value="dpid"', '<option disabled value="dpid"')}</select>`;
   } else if (s.op === "chroma") {
     f = `<select data-k="mode">${CHROMA.map(([v, t]) => `<option ${s.mode === v ? "selected" : ""} value="${v}">${t}</option>`).join("")}</select>
       <select data-k="matrix"><option value="601" ${(s.matrix || "601") === "601" ? "selected" : ""}>BT.601</option><option value="709" ${s.matrix === "709" ? "selected" : ""}>BT.709</option></select>`;
@@ -376,7 +431,16 @@ function renderSteps(el, list) {
       if (k === "noaa") { if (inp.checked) s.antialias = false; else delete s.antialias; }
       else if (k === "fixed_point") { if (inp.checked) s.fixed_point = true; else delete s.fixed_point; }
       else if (k === "scale") { s.scale = +inp.value; if (s.op === "irn") { changed(); render(); return; } }
+      else if (k === "direction" && s.op === "vsr") { if (inp.value === "both") delete s.direction; else s.direction = inp.value; }
       else if (k === "direction") { s.direction = inp.value; render(); return; }
+      else if (k === "memory") {
+        const v = parseInt(inp.value, 10);
+        if (isNaN(v) || v <= 1) { delete s.memory; delete s.direction; delete s.order; delete s.flow; }
+        else s.memory = Math.min(100, v);
+        changed(); render(); return;
+      }
+      else if (k === "flow") { const v = parseFloat(inp.value); if (isNaN(v) || v === 1) delete s.flow; else s.flow = Math.max(0, Math.min(3, v)); }
+      else if (k === "order" && s.op === "vsr") { if (inp.value === "normal") delete s.order; else s.order = inp.value; }
       else if (k === "variant") {
         if (inp.value === "standard") delete s.variant; else s.variant = inp.value;
         const sc = {standard: [2, 4, 8], plus: [4], finetune: [2]}[inp.value];
@@ -384,18 +448,29 @@ function renderSteps(el, list) {
         render(); return;
       }
       else if (k === "lambda") { const v = parseFloat(inp.value); if (v === 1 || isNaN(v)) delete s.lambda; else s.lambda = v; }
+      else if (k === "sigma") { const v = parseFloat(inp.value); if (v === 0.5 || isNaN(v)) delete s.sigma; else s.sigma = Math.max(0.2, Math.min(3, v)); }
       else if (k === "patch") { if (+inp.value === 2) delete s.patch; else s.patch = +inp.value; }
       else if (k === "iterations") { const v = parseInt(inp.value, 10); if (v === 200 || isNaN(v)) delete s.iterations; else s.iterations = Math.max(10, Math.min(1000, v)); }
       else if (k === "center") { if (inp.checked) delete s.center; else s.center = false; }
+      else if (k === "quality") { if (inp.value === "fast") delete s.quality; else s.quality = "best"; }
+      else if (k === "factor") { const v = parseFloat(inp.value); s.factor = isNaN(v) ? 0.5 : Math.max(0.05, Math.min(0.99, v)); }
+      else if (k === "mode" && s.op === "video") {
+        list[i] = inp.value === "squash" ? {op: "video", mode: "squash", axis: "x", factor: 0.5, down: "area", up: "bicubic"} : defaultStep("video");
+        render(); return;
+      }
       else s[k] = inp.value;
-      if (k === "method" && ["nearest", "area", "dpid"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
+      if (k === "method" && ["nearest", "area", "dpid", "wavelet53", "wavelet97"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
       if (k === "method" && s.method !== "dpid") delete s.lambda;
+      if (k === "method" && s.method !== "gaussian") delete s.sigma;
+      if (k === "method" && s.op === "resize" && NO_FP(s.method)) delete s.fixed_point;
       if (k === "method" && s.op === "resize") {
         if (s.method !== "perceptual") delete s.patch;
         if (s.method !== "kopf") delete s.iterations;
         if (["perceptual", "kopf"].includes(s.method)) { delete s.antialias; delete s.fixed_point; }
       }
-      if (k === "method" && s.op === "edi" && s.method === "mmpx") delete s.center;
+      if (k === "method" && s.op === "edi" && !EDI_CENTRABLE.includes(s.method)) delete s.center;
+      if (k === "method" && s.op === "edi" && !(EDI_SCALES[s.method] || [2, 4, 8]).includes(s.scale)) s.scale = (EDI_SCALES[s.method] || [2])[0];
+      if (k === "method" && s.op === "edi" && s.method !== "nnedi3") delete s.quality;
       if (k === "method") { render(); return; }
       if (s.width === null && s.op !== "resize") delete s.width;
       if (s.matrix === "601") delete s.matrix;

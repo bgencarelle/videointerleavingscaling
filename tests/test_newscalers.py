@@ -83,8 +83,21 @@ def test_mmpx_copies_input_pixels_and_keeps_flat_areas():
     assert torch.equal(edi.mmpx(flat), torch.full((1, 3, 10, 10), 0.25))
 
 
-@pytest.mark.parametrize("method", ["dcci", "nedi", "icbi", "eedi3"])
+def _native_ok(method):
+    import shutil
+    if method in ("eedi2", "nnedi3") and not shutil.which("c++"):
+        pytest.skip("no C++ compiler")
+    if method == "nnedi3":
+        try:
+            from faceloop.eedi import nnedi3_weights
+            nnedi3_weights()
+        except Exception:  # noqa: BLE001
+            pytest.skip("nnedi3 weights not available (no network)")
+
+
+@pytest.mark.parametrize("method", ["dcci", "nedi", "icbi", "eedi3", "eedi2", "nnedi3"])
 def test_lattice_methods_keep_originals_and_ramps(method):
+    _native_ok(method)
     x = _img()
     y = edi.upscale2(x, method, center=False)
     assert y.shape == (1, 3, 48, 64)
@@ -93,7 +106,7 @@ def test_lattice_methods_keep_originals_and_ramps(method):
     ramp = torch.from_numpy(((xx * 3 + yy * 5) / 255.0).astype(np.float32))[None, None].repeat(1, 3, 1, 1)
     o = edi.upscale2(ramp, method, center=False)[0, 0].numpy() * 255
     want = xx[2:-3, 2:-3] * 3 + 1.5 + yy[2:-3, 2:-3] * 5
-    assert np.abs(o[4:-6:2, 5:-6:2] - want).max() < 0.05
+    assert np.abs(o[4:-6:2, 5:-6:2] - want).max() < (0.51 if method in ("eedi2", "nnedi3") else 0.05)  # 8-bit filters
 
 
 def test_centring_removes_the_half_pixel_creep():
@@ -120,6 +133,21 @@ def test_dcci_is_mirror_symmetric():
     assert torch.allclose(a[..., 6:-6, 6:-6], b[..., 6:-6, 6:-6], atol=1e-5)
 
 
+def test_eedi2_runs_the_filter():
+    import shutil
+    if not shutil.which("c++"):
+        pytest.skip("no C++ compiler")
+    from faceloop.eedi import eedi2_2x
+    x = _img()
+    y = eedi2_2x(x)
+    assert y.shape == (1, 3, 48, 64)
+    assert torch.equal(y[..., 0::2, 0::2], x)  # 8-bit input: originals exactly
+    flat = torch.full((1, 3, 10, 12), 100 / 255)
+    assert torch.allclose(eedi2_2x(flat), torch.full((1, 3, 20, 24), 100 / 255))
+    with pytest.raises(ValueError):
+        eedi2_2x(torch.zeros(1, 3, 4, 4))
+
+
 def test_eedi3_rows_shape_and_flat():
     S = torch.full((2, 6, 9), 100.0)
     out = eedi3_rows(S)
@@ -141,9 +169,14 @@ def test_seam_methods_are_gone():
     [{"op": "edi", "method": "mmpx", "scale": 2, "width": 32}],
     [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "icbi", "scale": 2, "center": False}],
     [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "eedi3", "scale": 2}],
+    [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "eedi2", "scale": 2}],
+    [{"op": "resize", "method": "area", "width": 16}, {"op": "edi", "method": "nnedi3", "scale": 2, "quality": "best"}],
 ])
 def test_new_methods_in_a_pass(tmp_path, cycle):
     from PIL import Image
+    for st in cycle:
+        if st.get("op") == "edi":
+            _native_ok(st["method"])
     src = tmp_path / "src"
     src.mkdir()
     for i in range(2):

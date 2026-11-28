@@ -45,6 +45,8 @@ def step_label(s: dict) -> str:
             extra.append("fixed")
         if s["method"] == "dpid":
             extra.append(f"λ{s.get('lambda', 1.0):g}")
+        if s["method"] == "gaussian":
+            extra.append(f"σ{s.get('sigma', 0.5):g}")
         return f"{s['method']}{' ' + ' '.join(extra) if extra else ''}->{ws}"
     if op == "model":
         return f"{s['model']}->{ws or 'native'}"
@@ -54,6 +56,13 @@ def step_label(s: dict) -> str:
         return f"{s['method']} x{s['scale']}->{ws or 'native'}"
     if op == "chroma":
         return f"chroma {s.get('mode', '420')}"
+    if op == "vsr":
+        mem = s.get("memory", 1)
+        return f"{s.get('model', 'basicvsr-reds4')} x4{' mem ' + str(mem) if mem != 1 else ''}->{ws or 'native'}"
+    if op == "video":
+        if s.get("mode") == "fields":
+            return f"fields {s.get('field', 'alternate')} {s.get('rebuild', 'linear')}"
+        return f"squash {s.get('axis', 'x')} x{s.get('factor')}"
     if op == "irn":
         v = {"plus": "IRN+", "finetune": "IRN-ft"}.get(s.get("variant", "standard"), "IRN")
         return f"{v} {'shrink' if s['direction'] == 'down' else 'enlarge'} x{s['scale']}->{ws or 'native'}"

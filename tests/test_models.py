@@ -52,7 +52,8 @@ def test_catalog_is_complete_and_pinned():
                 continue
             assert len(f["sha256"]) == 64
             assert f["url"].startswith("https://github.com/") or \
-                f["url"].startswith("https://raw.githubusercontent.com/nihui/")
+                f["url"].startswith("https://raw.githubusercontent.com/nihui/") or \
+                f["url"].startswith("https://download.openmmlab.com/mmediting/")   # BasicVSR's official home
             if "raw.githubusercontent" in f["url"]:
                 # pinned to a commit, never a branch
                 assert len(f["url"].split("/")[5]) == 40

@@ -64,6 +64,9 @@ class StepContext:
     loop: Size | None = None  # size after the lead-in
     precision: str = "fp32"   # AI models: "fp32" | "fp16"
     check: Callable[[], None] | None = None  # called before every step; may raise to stop
+    cycle: int = 1            # which cycle is running (1-based; 0 in the lead-in)
+    frame0: int = 0           # sequence position of the batch's first frame
+    batch_names: list | None = None   # the batch's file names, set only while a cycle runs on it
 
 
 def _target(step: dict, src: Size, cur: Size, loop: Size | None = None) -> Size | None:
@@ -114,7 +117,9 @@ def _kernel(x: torch.Tensor, target: Size, method: str, ctx: StepContext, **kw) 
 # is processed on its own.
 PIECE_BUDGET = 2 * 1024 ** 3                    # bytes of working memory per piece
 WORK_COPIES = {"xbr": 24, "dpid": 32, "chroma": 8, "resize": 6, "perceptual": 10, "kopf": 120,
-               "edi_mmpx": 40, "edi_dcci": 40, "edi_nedi": 90, "edi_icbi": 60, "edi_eedi3": 220}
+               "edi_mmpx": 40, "edi_dcci": 40, "edi_nedi": 90, "edi_icbi": 60, "edi_eedi3": 220, "edi_eedi2": 8, "edi_nnedi3": 8,
+               "edi_scale2x": 12, "edi_scale3x": 12, "edi_2xsai": 30, "edi_super2xsai": 30, "edi_supereagle": 30,
+               "edi_hqx": 6, "edi_superxbr": 60, "edi_scalefx": 120}
 
 
 def _in_pieces(fn, x: torch.Tensor, work_px: int, kind: str) -> torch.Tensor:
@@ -160,7 +165,7 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
         elif step["method"] in ("perceptual", "kopf"):
             kw = {k: step[k] for k in ("patch", "iterations") if k in step}
         else:
-            kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits") if k in step}
+            kw = {k: step[k] for k in ("antialias", "fixed_point", "phase_bits", "coef_bits", "sigma") if k in step}
         t = _target(step, ctx.src, cur, ctx.loop)
         big = max(cur.width * cur.height, t.width * t.height if t is not None else 0)
         kind = step["method"] if step["method"] in WORK_COPIES else "resize"
@@ -184,8 +189,19 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
         from .edi import upscale
         sc, meth = int(step["scale"]), step["method"]
         center = step.get("center", True)
-        x = _in_pieces(lambda p: upscale(p, meth, sc, center, check=ctx.check).clamp(0, 1), x,
+        ekw = {"quality": step["quality"]} if meth == "nnedi3" and "quality" in step else {}
+        x = _in_pieces(lambda p: upscale(p, meth, sc, center, check=ctx.check, **ekw).clamp(0, 1), x,
                        cur.width * cur.height * sc * sc, "edi_" + meth)
+        t = _target(step, ctx.src, cur, ctx.loop)
+        if t is not None:
+            x = _kernel(x, t, "area", ctx)
+    elif op == "vsr":
+        from .models.basicvsr import run_vsr
+        from .recipe import VSR_DEFAULT
+        net = ctx.models.get_vsr(step.get("model", VSR_DEFAULT), x.device, ctx.precision)
+        names = ctx.batch_names if ctx.batch_names is not None and len(ctx.batch_names) == x.shape[0] else None
+        x = run_vsr(net, x, names, ctx.frame0, step.get("direction", "both"), int(step.get("memory", 1)),
+                    float(step.get("flow", 1.0)), step.get("order", "normal"), ctx.cycle, ctx.check).clamp(0, 1)
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
@@ -196,6 +212,16 @@ def apply_step(x: torch.Tensor, step: dict, ctx: StepContext) -> torch.Tensor:
         t = _target(step, ctx.src, cur, ctx.loop)
         if t is not None:
             x = _kernel(x, t, "area", ctx)
+    elif op == "video":
+        from .video import fields, squash
+        if step["mode"] == "fields":
+            x = fields(x, step.get("field", "alternate"), step.get("rebuild", "linear"), ctx.cycle)
+        else:
+            def rs(t, w, h, method):
+                return _kernel(t, Size(w, h), method, ctx)
+            x = _in_pieces(lambda p: squash(p, rs, step.get("axis", "x"), float(step["factor"]),
+                                            step.get("down", "area"), step.get("up", "bicubic")),
+                           x, cur.width * cur.height, "resize")
     elif op == "chroma":
         from .chroma import subsample
         x = _in_pieces(lambda p: subsample(p, step.get("mode", "420"), step.get("matrix", "601")),
@@ -244,7 +270,7 @@ def _sync(device: torch.device) -> None:
         torch.cuda.synchronize()
 
 
-def _cycle_throttled(x, steps, ctx, lock, capture, want, cname, batch, on_contact):
+def _cycle_throttled(x, steps, ctx, lock, capture, want, cname, batch, on_contact, first=0):
     """One cycle for a batch. With a reserve set (see throttle.py) the batch
     runs in slices with idle gaps between them, so the Mac's own use of the
     GPU gets regular turns. Frames are independent, so results are the same."""
@@ -254,7 +280,11 @@ def _cycle_throttled(x, steps, ctx, lock, capture, want, cname, batch, on_contac
         with lock:
             if capture:
                 capture(-1, x)
-            y = run_cycle(x, steps, ctx, capture)
+            ctx.frame0, ctx.batch_names = first, [p.name for p in batch]
+            try:
+                y = run_cycle(x, steps, ctx, capture)
+            finally:
+                ctx.batch_names = None
             if sl is not None:
                 _sync(x.device)
         THROTTLE.pause_after(time.time() - t1)
@@ -271,7 +301,11 @@ def _cycle_throttled(x, steps, ctx, lock, capture, want, cname, batch, on_contac
         with lock:
             if cap:
                 cap(-1, xs)
-            parts.append(run_cycle(xs, steps, ctx, cap))
+            ctx.frame0, ctx.batch_names = first + j, [p.name for p in batch[j:j + sl]]
+            try:
+                parts.append(run_cycle(xs, steps, ctx, cap))
+            finally:
+                ctx.batch_names = None
             _sync(x.device)
         THROTTLE.pause_after(time.time() - t1)
     return torch.cat(parts, 0)
@@ -517,6 +551,8 @@ def _scale_lookup(models):
     def scale_of(st):
         if st.get("op") in ("xbr", "edi"):
             return int(st["scale"])
+        if st.get("op") == "vsr":
+            return 4
         info = getattr(models, "catalog", {}).get(st.get("model")) if models is not None else None
         return info.scale if info and info.scale else None
     return scale_of
@@ -532,13 +568,13 @@ def step_size(st: dict, cur: Size, src: Size, loop: Size | None, scale_of) -> tu
         raw = ([-(-cur.width // k), -(-cur.height // k)] if st.get("direction") == "down"
                else [cur.width * k, cur.height * k])
         return (tgt or Size(*raw)), raw, True
-    if op in ("model", "xbr", "edi"):
+    if op in ("model", "xbr", "edi", "vsr"):
         k = scale_of(st)
         if not k:
             return (tgt or cur), None, False
         raw = [cur.width * k, cur.height * k]
         return (tgt or Size(*raw)), raw, True
-    if op == "chroma":
+    if op in ("chroma", "video"):
         return cur, None, True
     return (tgt or cur), None, True
 
@@ -615,7 +651,7 @@ def _sim(steps: list[dict], cur: Size, src: Size, loop: Size | None, biggest: in
             tgt = None
         if s.get("op") == "irn" and s.get("direction") == "down":
             cur = tgt or Size(-(-cur.width // int(s["scale"])), -(-cur.height // int(s["scale"])))
-        elif s.get("op") in ("model", "xbr", "irn", "edi"):
+        elif s.get("op") in ("model", "xbr", "irn", "edi", "vsr"):
             k = int(s.get("scale", 4))  # models: assume up to x4 before landing
             biggest = max(biggest, cur.width * cur.height * k * k)
             cur = tgt or Size(cur.width * k, cur.height * k)
@@ -642,7 +678,8 @@ def plan_sizes(recipe: Recipe, src: Size, models=None) -> dict:
             cur, raw, ok = step_size(st, cur, src, loop, scale_of)
             rows.append({"width": cur.width, "height": cur.height, "from": [before.width, before.height],
                          "raw": raw, "scale": (int(st["scale"]) if st.get("op") == "irn"
-                                               else scale_of(st) if st.get("op") in ("model", "xbr", "edi") else None),
+                                               else scale_of(st) if st.get("op") in ("model", "xbr", "edi", "vsr")
+                                               else None),
                          "dir": st.get("direction"),
                          "error": round(aspect_error(cur, src), 3),
                          "note": "" if ok else "scale unknown until loaded"})
@@ -941,6 +978,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
     def stage_cycle(ci, first):
         """Stage ci: the frames after cycle ci-1 through cycle ci."""
         cname = recipe.cycle_at(ci)
+        ctx.cycle = ci
         want_all = ci == last_of_cycle.get(cname) and on_contact is not None
 
         def read(i):
@@ -957,7 +995,7 @@ def run_pass(recipe: Recipe, source: Path, out_root: Path, *,
             if want:
                 def capture(step_i, t, _c=cname, _w=want, _b=names):
                     on_contact(_c, step_i, [_b[k].name for k in _w], to_uint8(t[_w]))
-            x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, names, on_contact)
+            x = _cycle_throttled(x, cycles[cname], ctx, lock, capture, want, cname, names, on_contact, i)
             yield i, x
 
     try:
@@ -1089,6 +1127,16 @@ def _describe_step(s: dict) -> str:
         return f"{s['method']} x{s['scale']}->{w if w else 'native'}"
     if s["op"] == "chroma":
         return f"chroma {s.get('mode', '420')} ({s.get('matrix', '601')})"
+    if s["op"] == "vsr":
+        mem = s.get("memory", 1)
+        how = ("each frame alone" if mem == 1 else
+               f"memory {mem} frames, {s.get('direction', 'both')}, {s.get('order', 'normal')} order, "
+               f"flow x{s.get('flow', 1.0)}")
+        return f"{s.get('model', 'basicvsr-reds4')} x4 ({how})"
+    if s["op"] == "video":
+        if s["mode"] == "fields":
+            return f"fields {s.get('field', 'alternate')} ({s.get('rebuild', 'linear')})"
+        return f"squash {s.get('axis', 'x')} x{s['factor']} ({s.get('down', 'area')}/{s.get('up', 'bicubic')})"
     if s["op"] == "irn":
         v = {"plus": "IRN+", "finetune": "IRN-finetune"}.get(s.get("variant", "standard"), "IRN")
         return f"{v} {s['direction']} x{s['scale']}->{w if w else 'native'}"

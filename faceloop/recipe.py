@@ -55,7 +55,12 @@ from typing import Any
 ENGINE_PIXELS_VERSION = 5
 
 KERNEL_SHORT = {"nearest": "near", "area": "area", "bilinear": "bil",
-                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid", "perceptual": "perc", "kopf": "kopf"}
+                "bicubic": "bic", "lanczos": "lanc", "dpid": "dpid", "perceptual": "perc", "kopf": "kopf",
+                "lanczos2": "lanc2", "lanczos4": "lanc4", "lanczos8": "lanc8", "mitchell": "mitch",
+                "catrom": "crom", "bspline": "bspl", "hermite": "herm", "spline16": "spl16", "spline36": "spl36",
+                "spline64": "spl64", "gaussian": "gauss", "magic": "mks", "ewa_lanczos": "ewaL",
+                "ewa_lanczossharp": "ewaLS", "ewa_robidoux": "ewaR", "ewa_robidouxsharp": "ewaRS",
+                "dct": "dct", "fft": "fft", "wavelet53": "wav53", "wavelet97": "wav97"}
 CONTENT_AWARE = ("perceptual", "kopf")
 
 
@@ -146,6 +151,7 @@ class Recipe:
 
     def model_ids(self) -> set[str]:
         ids = {s["model"] for _, s in self.all_steps() if s.get("op") == "model"}
+        ids |= {s.get("model", VSR_DEFAULT) for _, s in self.all_steps() if s.get("op") == "vsr"}
         return ids | {irn_id(s) for _, s in self.all_steps() if s.get("op") == "irn"}
 
     def validate(self, known_models: set[str] | None = None) -> None:
@@ -185,6 +191,16 @@ class Recipe:
             if op == "resize":
                 if s.get("method") not in METHODS + ("dpid",) + CONTENT_AWARE:
                     raise RecipeError(f"{where}: unknown kernel {s.get('method')!r}")
+                if s.get("method") == "gaussian":
+                    sg = s.get("sigma", 0.5)
+                    if not isinstance(sg, (int, float)) or not (0.2 <= sg <= 3.0):
+                        raise RecipeError(f"{where}: gaussian sigma must be 0.2 to 3")
+                elif "sigma" in s:
+                    raise RecipeError(f"{where}: sigma is only for the gaussian kernel")
+                if s.get("method", "").startswith("ewa_") and s.get("fixed_point"):
+                    raise RecipeError(f"{where}: fixed-point isn't available for EWA filters")
+                if s.get("method") in ("dct", "fft", "wavelet53", "wavelet97") and s.get("fixed_point"):
+                    raise RecipeError(f"{where}: fixed-point isn't available for the frequency methods")
                 if s.get("method") == "perceptual" and s.get("patch", 2) not in (2, 3, 4):
                     raise RecipeError(f"{where}: perceptual patch must be 2, 3 or 4")
                 if s.get("method") == "kopf":
@@ -203,15 +219,34 @@ class Recipe:
                     raise RecipeError(f"{where}: model step needs a model id")
                 if known_models is not None and m not in known_models:
                     raise RecipeError(f"{where}: unknown model {m!r}")
+            elif op == "vsr":
+                m = s.get("model", VSR_DEFAULT)
+                if known_models is not None and m not in known_models:
+                    raise RecipeError(f"{where}: unknown video model {m!r}")
+                if not m.startswith("basicvsr"):
+                    raise RecipeError(f"{where}: {m!r} isn't a video model")
+                mem = s.get("memory", 1)
+                if not isinstance(mem, int) or isinstance(mem, bool) or not 1 <= mem <= 100:
+                    raise RecipeError(f"{where}: memory must be a whole number of frames, 1 to 100")
+                if s.get("direction", "both") not in ("both", "forward", "backward"):
+                    raise RecipeError(f"{where}: direction must be both, forward or backward")
+                if s.get("order", "normal") not in ("normal", "reverse", "shuffle"):
+                    raise RecipeError(f"{where}: order must be normal, reverse or shuffle")
+                fl = s.get("flow", 1.0)
+                if not isinstance(fl, (int, float)) or isinstance(fl, bool) or not 0 <= fl <= 3:
+                    raise RecipeError(f"{where}: flow strength must be between 0 and 3")
             elif op == "xbr":
                 if s.get("scale") not in (2, 3, 4):
                     raise RecipeError(f"{where}: xBR scale must be 2, 3 or 4")
             elif op == "edi":
-                from .edi import METHODS as EDI_METHODS
-                if s.get("method") not in EDI_METHODS or s.get("method") == "eedi2":
+                from .edi import METHODS as EDI_METHODS, SCALES as EDI_SCALES
+                if s.get("method") not in EDI_METHODS:
                     raise RecipeError(f"{where}: unknown 2x method {s.get('method')!r}")
-                if s.get("scale") not in (2, 4, 8):
-                    raise RecipeError(f"{where}: {s.get('method')} scale must be 2, 4 or 8")
+                ok = EDI_SCALES[s["method"]]
+                if s.get("scale") not in ok:
+                    raise RecipeError(f"{where}: {s['method']} scale must be {', '.join(map(str, ok[:-1]))} or {ok[-1]}")
+                if s.get("method") == "nnedi3" and s.get("quality", "fast") not in ("fast", "best"):
+                    raise RecipeError(f"{where}: nnedi3 quality must be 'fast' or 'best'")
             elif op == "irn":
                 v = s.get("variant", "standard")
                 ok = {"standard": (2, 4, 8), "plus": (4,), "finetune": (2,)}
@@ -223,6 +258,29 @@ class Recipe:
                     raise RecipeError(f"{where}: IRN direction must be 'down' or 'up'")
                 if known_models is not None and irn_id(s) not in known_models:
                     raise RecipeError(f"{where}: {irn_id(s)} isn't available")
+            elif op == "video":
+                from .video import AXES, FIELDS, REBUILD
+                from .kernels import METHODS as KMETHODS
+                mode = s.get("mode")
+                if w is not None:
+                    raise RecipeError(f"{where}: a video step keeps the size, so it takes no width")
+                if mode == "fields":
+                    if s.get("field", "alternate") not in FIELDS:
+                        raise RecipeError(f"{where}: field must be top, bottom or alternate")
+                    if s.get("rebuild", "linear") not in REBUILD:
+                        raise RecipeError(f"{where}: rebuild must be double, linear or cubic")
+                elif mode == "squash":
+                    if s.get("axis", "x") not in AXES:
+                        raise RecipeError(f"{where}: squash axis must be x or y")
+                    f = s.get("factor")
+                    if not isinstance(f, (int, float)) or not 0.05 <= f <= 0.99:
+                        raise RecipeError(f"{where}: squash factor must be between 0.05 and 0.99")
+                    if s.get("down", "area") not in KMETHODS + ("dpid",):
+                        raise RecipeError(f"{where}: unknown squash method {s.get('down')!r}")
+                    if s.get("up", "bicubic") not in KMETHODS:
+                        raise RecipeError(f"{where}: unknown stretch method {s.get('up')!r}")
+                else:
+                    raise RecipeError(f"{where}: video mode must be fields or squash")
             elif op == "chroma":
                 from .chroma import MATRICES, MODES
                 if s.get("mode", "420") not in MODES:
@@ -322,6 +380,8 @@ def _step_slug(s: dict) -> str:
         m = KERNEL_SHORT.get(s["method"], s["method"])
         if s["method"] == "dpid" and s.get("lambda", 1.0) != 1.0:
             m += f"{s['lambda']:g}"
+        if s["method"] == "gaussian" and s.get("sigma", 0.5) != 0.5:
+            m += f"{s['sigma']:g}"
         if s["method"] == "perceptual" and s.get("patch", 2) != 2:
             m += f"p{s['patch']}"
         if s["method"] == "kopf" and s.get("iterations", 200) != 200:
@@ -336,12 +396,31 @@ def _step_slug(s: dict) -> str:
     if s.get("op") == "xbr":
         return f"xbr{s['scale']}@{ws}" if ws else f"xbr{s['scale']}"
     if s.get("op") == "edi":
-        tag = f"{s['method']}{s['scale']}" + ("raw" if s.get("center") is False and s["method"] != "mmpx" else "")
+        from .edi import CENTRABLE
+        short = {"2xsai": "sai", "super2xsai": "ssai", "supereagle": "seagle", "superxbr": "sxbr",
+                 "scale2x": "sc2x", "scale3x": "sc3x", "hqx": "hq", "scalefx": "sfx"}.get(s["method"], s["method"])
+        tag = (f"{short}{s['scale']}" + ("q" if s.get("quality") == "best" else "")
+               + ("raw" if s.get("center") is False and s["method"] in CENTRABLE else ""))
         return f"{tag}@{ws}" if ws else tag
     if s.get("op") == "irn":
         v = {"plus": "P", "finetune": "F"}.get(s.get("variant", "standard"), "")
         tag = f"irn{v}{'D' if s['direction'] == 'down' else 'U'}{s['scale']}"
         return f"{tag}@{ws}" if ws else tag
+    if s.get("op") == "vsr":
+        m = s.get("model", VSR_DEFAULT).replace("basicvsr-", "bvsr")
+        mem = s.get("memory", 1)
+        if mem == 1:
+            return m
+        extra = {"forward": "f", "backward": "b"}.get(s.get("direction", "both"), "")
+        extra += {"reverse": "rev", "shuffle": "shuf"}.get(s.get("order", "normal"), "")
+        fl = s.get("flow", 1.0)
+        return f"{m}m{mem}{extra}" + ("" if fl == 1 else f"fl{round(fl * 100)}")
+    if s.get("op") == "video":
+        if s["mode"] == "fields":
+            return f"fld{s.get('field', 'alternate')[0]}{s.get('rebuild', 'linear')[0]}"
+        d, u = s.get("down", "area"), s.get("up", "bicubic")
+        return (f"sq{s.get('axis', 'x')}{round(s['factor'] * 100)}"
+                f"{KERNEL_SHORT.get(d, d)}{KERNEL_SHORT.get(u, u)}")
     if s.get("op") == "chroma":
         mx = "" if s.get("matrix", "601") == "601" else s["matrix"]
         return f"c{s.get('mode', '420')}{mx}"
@@ -353,6 +432,9 @@ _SHORT = [("realesrgan-x4plus-anime", "esrAnime4"), ("realesrgan-x4plus", "esrga
           ("realesr-animevideov3", "avv3"), ("realesr-general-wdn-x4v3", "genwdn4"),
           ("realesr-general-x4v3", "gen4"), ("swinir-classical-", "swin"),
           ("w2x-cunet-denoise-", "w2xdn"), ("w2x-", "w2x"), ("rcugan-", "cug"), ("dropin-", "d")]
+
+
+VSR_DEFAULT = "basicvsr-reds4"
 
 
 def irn_id(step: dict) -> str:

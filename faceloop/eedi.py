@@ -1,4 +1,4 @@
-"""EEDI3 (enhanced edge directed interpolation 3) as a 2x upscaler.
+"""EEDI3, EEDI2 and NNEDI3 as 2x upscalers.
 
 Port of the VapourSynth EEDI3 filter (Kevin Stone 2010, Laurent de Soras
 2013, VapourSynth port by HolyWu), which is licensed under the GNU GPL
@@ -201,5 +201,162 @@ def eedi3_2x(x: torch.Tensor, **kw) -> torch.Tensor:
     return (t.transpose(1, 2) / 255.0).reshape(n, c, 2 * h, 2 * w)
 
 
-def eedi2_2x(x: torch.Tensor, **kw) -> torch.Tensor:  # pragma: no cover - not ported yet
-    raise NotImplementedError("EEDI2 isn't ported yet")
+# ===================================================================== EEDI2
+# The filter itself, compiled from faceloop/native (GPL-2+, unchanged) and
+# called per plane: rows (field=1: originals on the even rows), then columns.
+_LIB = None
+_LIB_LOCK = __import__("threading").Lock()
+
+
+def _eedi2_lib():
+    global _LIB
+    with _LIB_LOCK:
+        if _LIB is not None:
+            return _LIB
+        import ctypes
+        from .native.build import library
+        L = ctypes.CDLL(str(library("eedi2", "eedi2_shim.cpp", ["EEDI2.cpp", "VapourSynth.h", "VSHelper.h"])))
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        L.eedi2_plane.argtypes = [u8p, ctypes.c_int, ctypes.c_int, u8p] + [ctypes.c_int] * 9
+        L.eedi2_plane.restype = ctypes.c_int
+        _LIB = L
+        return L
+
+
+def _eedi2_rows(plane, p):
+    """uint8 (h, w) -> (2h, w)."""
+    import ctypes
+    import numpy as np
+    h, w = plane.shape
+    src = np.ascontiguousarray(plane)
+    out = np.empty((2 * h, w), np.uint8)
+    u8p = ctypes.POINTER(ctypes.c_uint8)
+    rc = _eedi2_lib().eedi2_plane(src.ctypes.data_as(u8p), w, h, out.ctypes.data_as(u8p), 1, p["mthresh"],
+                                  p["lthresh"], p["vthresh"], p["estr"], p["dstr"], p["maxd"], p["nt"], p["pp"])
+    if rc:
+        raise ValueError(f"EEDI2 can't work on {w}x{h} (it needs at least 8x7)")
+    return out
+
+
+EEDI2_DEFAULTS = {"mthresh": 10, "lthresh": 20, "vthresh": 20, "estr": 2, "dstr": 4, "maxd": 24, "nt": 50, "pp": 1}
+
+
+def eedi2_2x(x: torch.Tensor, **kw) -> torch.Tensor:
+    """(N,C,H,W) encoded 0..1 -> (N,C,2H,2W) with the filter's defaults
+    (mthresh 10, lthresh 20, vthresh 20, estr 2, dstr 4, maxd 24, nt 50,
+    pp 1). EEDI2 is 8-bit: frames go through it as 8-bit codes."""
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor
+    p = {**EEDI2_DEFAULTS, **kw}
+    n, c, h, w = x.shape
+    if w < 8 or h < 7 or 2 * h < 8 or w < 7:
+        raise ValueError(f"EEDI2 needs frames at least 8x7, these are {w}x{h}")
+    codes = torch.round(x.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy().reshape(n * c, h, w)
+
+    def one(plane):
+        t = _eedi2_rows(plane, p)                       # (2h, w)
+        return _eedi2_rows(np.ascontiguousarray(t.T), p).T  # (2w, 2h) -> (2h, 2w)
+    import os
+    with ThreadPoolExecutor(max_workers=max(1, min(len(codes), os.cpu_count() or 4))) as ex:
+        planes = list(ex.map(one, codes))
+    out = torch.from_numpy(np.stack(planes).reshape(n, c, 2 * h, 2 * w).astype(np.float32) / 255.0)
+    return out.to(x.device, x.dtype)
+
+
+# ===================================================================== NNEDI3
+NNEDI3_WEIGHTS = {
+    "url": "https://raw.githubusercontent.com/dubhater/vapoursynth-nnedi3/"
+           "82993ff21cf569776fc1a7e5bb60235c00bbeea3/src/nnedi3_weights.bin",
+    "sha256": "27f382430435bb7613deb1c52f3c79c300c9869812cfe29079432a9c82251d42",
+}
+# "fast" is the filter's own default; "best" what nnedi3_rpow2 scripts use for upscaling
+NNEDI3_QUALITY = {"fast": dict(nsize=6, nns=1, qual=1), "best": dict(nsize=0, nns=3, qual=2)}
+_NN = None
+_NN_LOCK = __import__("threading").Lock()
+
+
+def nnedi3_weights() -> "Path":
+    """weights/nnedi3/nnedi3_weights.bin, downloaded (13.5 MB, checked) the first time."""
+    import hashlib
+    import os
+    import urllib.request
+    from .models import default_weights_dir, sha256_file
+    dest = default_weights_dir() / "nnedi3" / "nnedi3_weights.bin"
+    if dest.exists() and sha256_file(dest) == NNEDI3_WEIGHTS["sha256"]:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    h = hashlib.sha256()
+    req = urllib.request.Request(NNEDI3_WEIGHTS["url"], headers={"User-Agent": "faceloop"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as out:
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            out.write(b)
+            h.update(b)
+    if h.hexdigest() != NNEDI3_WEIGHTS["sha256"]:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("nnedi3_weights.bin: checksum mismatch")
+    os.replace(tmp, dest)
+    return dest
+
+
+def _nnedi3_lib():
+    global _NN
+    with _NN_LOCK:
+        if _NN is not None:
+            return _NN
+        import ctypes
+        from .native.build import library
+        L = ctypes.CDLL(str(library("nnedi3", "nnedi3_shim.cpp", ["nnedi3.cpp", "cpufeatures.h", "VapourSynth.h",
+                                                                   "VSHelper.h"], arm_extra=["simd_neon.c"])))
+        L.nnedi3_setup.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int] + [ctypes.c_int] * 5 + \
+            [ctypes.c_char_p, ctypes.c_int]
+        L.nnedi3_setup.restype = ctypes.c_int
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        L.nnedi3_plane.argtypes = [u8p, ctypes.c_int, ctypes.c_int, u8p]
+        L.nnedi3_plane.restype = ctypes.c_int
+        _NN = L
+        return L
+
+
+def _nnedi3_rows(planes, quality: str):
+    """uint8 (P, h, w) -> (P, 2h, w), originals on the even rows (field 1, dh)."""
+    import ctypes
+    import os
+    import numpy as np
+    from concurrent.futures import ThreadPoolExecutor
+    L = _nnedi3_lib()
+    P, h, w = planes.shape
+    q = NNEDI3_QUALITY[quality]
+    err = ctypes.create_string_buffer(512)
+    with _NN_LOCK:  # one plane size at a time: the filter is set up per size
+        if L.nnedi3_setup(str(nnedi3_weights().parent).encode(), w, h, q["nsize"], q["nns"], q["qual"], 0, 2,
+                          err, 512):
+            raise ValueError(err.value.decode(errors="replace"))
+        out = np.empty((P, 2 * h, w), np.uint8)
+        u8p = ctypes.POINTER(ctypes.c_uint8)
+        src = np.ascontiguousarray(planes)
+
+        def one(i):
+            if L.nnedi3_plane(src[i].ctypes.data_as(u8p), w, h, out[i].ctypes.data_as(u8p)):
+                raise RuntimeError("nnedi3 failed")
+        with ThreadPoolExecutor(max_workers=max(1, min(P, os.cpu_count() or 4))) as ex:
+            list(ex.map(one, range(P)))
+    return out
+
+
+def nnedi3_2x(x: torch.Tensor, quality: str = "fast", **_) -> torch.Tensor:
+    """(N,C,H,W) encoded 0..1 -> (N,C,2H,2W): the nnedi3 filter on 8-bit
+    codes, rows then columns, prescreener 2 (the filter's default for 8-bit),
+    etype 0. quality "fast" = nsize 6, nns 1, qual 1 (the filter's
+    defaults); "best" = nsize 0, nns 3, qual 2 (nnedi3_rpow2's)."""
+    import numpy as np
+    n, c, h, w = x.shape
+    codes = torch.round(x.clamp(0, 1) * 255).to(torch.uint8).cpu().numpy().reshape(n * c, h, w)
+    t = _nnedi3_rows(codes, quality)                                   # (P, 2h, w)
+    t = _nnedi3_rows(np.ascontiguousarray(t.transpose(0, 2, 1)), quality)  # (P, 2w, 2h)
+    t = t.transpose(0, 2, 1)
+    return torch.from_numpy(np.ascontiguousarray(t).reshape(n, c, 2 * h, 2 * w).astype(np.float32) / 255.0).to(
+        x.device, x.dtype)

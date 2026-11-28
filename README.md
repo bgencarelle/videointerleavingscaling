@@ -136,11 +136,30 @@ A recipe is a JSON file with three parts:
 }
 ```
 
-- `method`: `nearest`, `area`, `bilinear`, `bicubic`, `lanczos`
+- `method`: `nearest`, `area`, `bilinear`, `bicubic`, `lanczos`; also
+  `lanczos2`/`lanczos4`/`lanczos8`, `mitchell`, `catrom`, `bspline`,
+  `hermite`, `spline16`/`spline36`/`spline64`, `gaussian` (with `"sigma"`),
+  `magic` (Magic Kernel Sharp); round filters `ewa_lanczos`,
+  `ewa_lanczossharp`, `ewa_robidoux`, `ewa_robidouxsharp`; frequency-domain
+  `dct`, `fft` (edges wrap around), `wavelet53`, `wavelet97` (JPEG 2000)
   - `"antialias": false`: shrink without prefiltering
   - `"fixed_point": true`: low-precision maths like old hardware scalers
 - `{"op": "xbr", "scale": 2, "width": 160}`: xBR pixel-art upscale (2, 3 or
   4), then area to `width` (optional).
+- `{"op": "edi", "method": "hqx", "scale": 3}`: edge-directed and pixel-art
+  upscalers: `dcci`, `nedi`, `icbi`, `eedi3`, `eedi2`, `nnedi3`, `mmpx`,
+  `scale2x`, `scale3x` (×3/×9), `2xsai`, `super2xsai`, `supereagle`, `hqx`
+  (×2/×3/×4), `superxbr`, `scalefx` (×3/×9); ×2/×4/×8 unless noted.
+- `{"op": "vsr", "model": "basicvsr-reds4", "memory": 1, "width": "loop"}`:
+  BasicVSR ×4. `memory` 1 (default) treats every frame alone; more lets it
+  learn from that many neighbouring frames, in frame-number order, inside the
+  batch in memory only; with it `direction` (both / forward / backward),
+  `order` (normal / reverse / shuffle) and `flow` (0-3).
+- `{"op": "video", "mode": "fields", "field": "alternate", "rebuild": "linear"}`:
+  interlacing, keep one field (`top`, `bottom`, `alternate` per cycle) and
+  rebuild the other lines (`double`, `linear`, `cubic`).
+- `{"op": "video", "mode": "squash", "axis": "x", "factor": 0.75, "down": "area", "up": "bicubic"}`:
+  squeeze one axis and stretch it back (anamorphic / low horizontal resolution).
 - `{"op": "resize", "method": "dpid", "width": 54, "lambda": 1.0}`: DPID,
   detail-preserving downscaling (keeps small highlights that stand out).
   `lambda` 0 = plain box filter; higher = more emphasis on standout pixels.
@@ -189,9 +208,11 @@ The list shows every model id, its factor, and its label (`accuracy` or
 `weights/irn/`. Then run `selftest`, which checks they load and run.
 
 Content-aware and edge-directed methods (no AI): in a resize step, pick
-perceptual or content-adaptive (Kopf); the "edge / pixel ×2" step does MMPX, DCCI, NEDI, ICBI or EEDI3
+perceptual or content-adaptive (Kopf); the "edge / pixel ×2" step does MMPX, DCCI, NEDI, ICBI, EEDI3, EEDI2 or NNEDI3
 at ×2/×4/×8. `faceloop/eedi.py` is a port of GPL-2 code and carries that
-licence. See SPEC.md for what each does and how it was checked.
+licence; EEDI2 and NNEDI3 are the original GPL-2 C++ filters in `faceloop/native/`,
+compiled the first time you use them (needs Xcode's command line tools, which Homebrew
+already installed). See SPEC.md for what each does and how it was checked.
 
 IRN is a heavy network on the GPU. With half precision on, the first time a
 pass uses it at a frame size it also tries the Neural Engine (via Core ML,

@@ -1176,6 +1176,60 @@
      "manual": "https://drive.google.com/drive/folders/1ym6DvYNQegDrOy_4z733HxrULa1XIN92"
     }
    ]
+  },
+  {
+   "id": "basicvsr-reds4",
+   "family": "vsr",
+   "label": "accuracy",
+   "scale": 4,
+   "backend": "basicvsr",
+   "args": {
+    "file": "basicvsr_reds4_20120409-0e599677.pth"
+   },
+   "description": "BasicVSR x4 (REDS): trained on frames shrunk with bicubic, from 720p video (OpenMMLab, Apache-2.0)",
+   "files": [
+    {
+     "path": "basicvsr/basicvsr_reds4_20120409-0e599677.pth",
+     "url": "https://download.openmmlab.com/mmediting/restorers/basicvsr/basicvsr_reds4_20120409-0e599677.pth",
+     "sha256": "0e59967787d309cee4f126c38e08ec644ca35933430996a7014954a45e373a31"
+    }
+   ]
+  },
+  {
+   "id": "basicvsr-vimeo-bi",
+   "family": "vsr",
+   "label": "accuracy",
+   "scale": 4,
+   "backend": "basicvsr",
+   "args": {
+    "file": "basicvsr_vimeo90k_bi_20210409-d2d8f760.pth"
+   },
+   "description": "BasicVSR x4 (Vimeo-90K, bicubic): trained on short clips shrunk with bicubic (OpenMMLab, Apache-2.0)",
+   "files": [
+    {
+     "path": "basicvsr/basicvsr_vimeo90k_bi_20210409-d2d8f760.pth",
+     "url": "https://download.openmmlab.com/mmediting/restorers/basicvsr/basicvsr_vimeo90k_bi_20210409-d2d8f760.pth",
+     "sha256": "d2d8f7606293d752ed5b005d16a9e671dc9750c2baac112c20a51b2a4900597d"
+    }
+   ]
+  },
+  {
+   "id": "basicvsr-vimeo-bd",
+   "family": "vsr",
+   "label": "accuracy",
+   "scale": 4,
+   "backend": "basicvsr",
+   "args": {
+    "file": "basicvsr_vimeo90k_bd_20210409-0154dd64.pth"
+   },
+   "description": "BasicVSR x4 (Vimeo-90K, blur): trained on clips blurred (Gaussian, sigma 1.6) then shrunk (OpenMMLab, Apache-2.0)",
+   "files": [
+    {
+     "path": "basicvsr/basicvsr_vimeo90k_bd_20210409-0154dd64.pth",
+     "url": "https://download.openmmlab.com/mmediting/restorers/basicvsr/basicvsr_vimeo90k_bd_20210409-0154dd64.pth",
+     "sha256": "0154dd64c4345d46d5318c5b73d7690cef7b6e137a4cc2134313028be648f8c3"
+    }
+   ]
   }
  ],
  "manual": [

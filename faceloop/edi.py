@@ -23,6 +23,13 @@ icbi   Giachetti & Asuni, "Real-Time Artifact-Free Image Upscaling", IEEE
        per colour channel. Follows the published code's defaults and step
        schedule; pixels are updated all at once per iteration (the
        original sweeps in raster order), so it isn't bit-identical.
+eedi3  port of the VapourSynth EEDI3 filter (eedi.py, GPL-2+).
+eedi2  the VapourSynth EEDI2 filter itself, compiled from faceloop/native
+       (GPL-2+), on 8-bit codes, on the CPU.
+nnedi3 the VapourSynth nnedi3 filter itself (dubhater's port of Kevin
+       Stone's NNEDI3, GPL-2+), compiled from faceloop/native with its NEON
+       code on Apple Silicon, on 8-bit codes, on the CPU; its weights file is
+       downloaded to weights/nnedi3/ the first time.
 
 The lattice methods (dcci, nedi, icbi, and eedi3 in eedi.py) keep the
 original pixels at even positions, which moves the picture by half a new
@@ -38,8 +45,11 @@ import math
 import torch
 import torch.nn.functional as F
 
-LATTICE = ("dcci", "nedi", "icbi", "eedi3", "eedi2")
-METHODS = ("mmpx",) + LATTICE
+LATTICE = ("dcci", "nedi", "icbi", "eedi3", "eedi2", "nnedi3")
+from .retro import METHODS as RETRO, OFFSET as _RETRO_OFFSET, SCALES as _RETRO_SCALES  # noqa: E402
+METHODS = ("mmpx",) + LATTICE + RETRO
+SCALES = {**{m: (2, 4, 8) for m in ("mmpx",) + LATTICE}, **_RETRO_SCALES}
+CENTRABLE = LATTICE + tuple(_RETRO_OFFSET)       # methods with a "keep centred" switch
 
 
 def _luma255(x):
@@ -86,12 +96,18 @@ def upscale2(x: torch.Tensor, method: str, center: bool = True, **kw) -> torch.T
     elif method == "eedi2":
         from .eedi import eedi2_2x
         y = eedi2_2x(x, **kw)
+    elif method == "nnedi3":
+        from .eedi import nnedi3_2x
+        y = nnedi3_2x(x, **kw)
     else:
         raise ValueError(f"unknown 2x method {method!r}")
     return half_pixel_shift(y) if center else y
 
 
 def upscale(x: torch.Tensor, method: str, scale: int, center: bool = True, check=None, **kw) -> torch.Tensor:
+    if method in RETRO:
+        from .retro import upscale as retro_upscale
+        return retro_upscale(x, method, scale, center, check)
     while scale > 1:
         if check:
             check()
